@@ -26,18 +26,13 @@ public:
     int openCount = 0;
     int exportCount = 0;
     QUrl lastSuggestedUrl;
-    double lastStart = 0;
-    double lastEnd = 0;
     QList<int> lastScaleHeights;
 
     void openVideo() override { ++openCount; }
 
-    void exportVideo(const QUrl &suggestedUrl, double start, double end,
-                     const QList<int> &scaleHeights) override {
+    void exportVideo(const QUrl &suggestedUrl, const QList<int> &scaleHeights) override {
         ++exportCount;
         lastSuggestedUrl = suggestedUrl;
-        lastStart = start;
-        lastEnd = end;
         lastScaleHeights = scaleHeights;
     }
 };
@@ -71,10 +66,13 @@ class ShortcutBackend : public QObject {
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
     Q_PROPERTY(QString themeAccent READ themeAccent NOTIFY themeAccentChanged)
     Q_PROPERTY(QString themeAccentForeground READ themeAccentForeground NOTIFY themeAccentChanged)
+    Q_PROPERTY(QObject *timeline READ timelineObject CONSTANT)
 
 public:
     explicit ShortcutBackend(QUrl source, double duration, QObject *parent = nullptr)
-        : QObject(parent), m_source(std::move(source)), m_duration(duration) {}
+        : QObject(parent), m_source(std::move(source)), m_duration(duration) {
+        timeline.reset(duration);
+    }
 
     QUrl source() const { return m_source; }
     double duration() const { return m_duration; }
@@ -85,29 +83,34 @@ public:
     QString status() const { return {}; }
     QString themeAccent() const { return QStringLiteral("#FFD60A"); }
     QString themeAccentForeground() const { return QStringLiteral("black"); }
+    QObject *timelineObject() { return &timeline; }
 
     Q_INVOKABLE bool load(const QUrl &) { return false; }
     Q_INVOKABLE void openVideoDialog() { ++openCount; }
-    Q_INVOKABLE void exportDialog(double start, double end) {
+    Q_INVOKABLE void exportDialog() {
         ++exportCount;
-        lastStart = start;
-        lastEnd = end;
+        exportedClips = timeline.clips();
     }
     Q_INVOKABLE QUrl suggestedExportUrl() const { return {}; }
-    Q_INVOKABLE void exportClip(const QUrl &, double, double) {}
     Q_INVOKABLE void requestThumbs(double start, double end) {
         ++thumbRequestCount;
         lastThumbStart = start;
         lastThumbEnd = end;
     }
 
-    void announceInfo() { emit infoChanged(); }
-    void announceExportDone() { emit exportDone(QStringLiteral("/tmp/exported.mp4")); }
+    void announceInfo() {
+        timeline.reset(m_duration);
+        emit infoChanged();
+    }
+    void announceExportDone() {
+        timeline.markExported(exportedClips);
+        emit exportDone(QStringLiteral("/tmp/exported.mp4"));
+    }
 
+    Timeline timeline;
+    edit::Clips exportedClips;
     int openCount = 0;
     int exportCount = 0;
-    double lastStart = 0;
-    double lastEnd = 0;
     int thumbRequestCount = 0;
     double lastThumbStart = 0;
     double lastThumbEnd = 0;
@@ -160,8 +163,8 @@ public:
 
     QQuickWindow *window() const { return m_window; }
     QQmlApplicationEngine &engine() { return m_engine; }
-    QQuickItem *trimBar() const {
-        return m_window ? m_window->findChild<QQuickItem *>(QStringLiteral("trimBar")) : nullptr;
+    QQuickItem *editBar() const {
+        return m_window ? m_window->findChild<QQuickItem *>(QStringLiteral("editBar")) : nullptr;
     }
 
 private:
@@ -180,9 +183,10 @@ private slots:
     void thumbProviderUsesRevisionPrefixedIds();
     void thumbProviderScalesHeightOnlyRequests();
     void thumbnailWorkerStopsBlockedJobs();
-    void exportDialogDelegatesSuggestedUrlAndRange();
+    void exportDialogDelegatesSuggestedUrl();
     void suggestedExportUrlAlwaysUsesMp4();
     void exportClipWritesMp4();
+    void exportKeepsOnlyTheClipsFromTheDialog();
     void exportClipCanReplaceSourceFile();
     void exportZeroLengthClipFails();
     void exportRefusesRewrittenPathOverExistingFile();
@@ -191,10 +195,18 @@ private slots:
     void qmlDoesNotCreateAudioOutputWithoutVideo();
     void qmlShortcutsTriggerBackendActions();
     void qmlArrowKeysMoveThePlayhead();
-    void qmlSpaceChordsSetTheTrimEdges();
-    void qmlZoomFocusesTheSelection();
-    void qmlQuitConfirmsUnexportedTrim();
+    void qmlSpaceChordsSetTheClipEdges();
+    void qmlKeysSplitRemoveAndRestoreClips();
+    void qmlBracketsJumpBetweenClipEdges();
+    void qmlZoomFocusesTheClip();
+    void qmlQuitConfirmsUnexportedEdit();
+    void timelineSplitsTrimsAndJoins();
+    void timelineUndoesAGestureAsOneStep();
+    void timelineTracksUnexportedCuts();
+    void timelineAnswersWhereTimesFall();
+    void timelineEditsAtATime();
     void trimArgsReencodeForPreciseCuts();
+    void trimArgsConcatenateTheRanges();
     void trimArgsScaleTheShorterSide();
     void exportHeightsNeverUpscale();
     void themeAccentReadsOmarchyColors();
@@ -203,6 +215,8 @@ private slots:
 private:
     QUrl videoUrl() const { return QUrl::fromLocalFile(m_videoPath); }
     QString formatName(const QString &path) const;
+    // A test pattern, with a tone when audio is set, written into m_dir.
+    QString makeVideo(const QString &name, double duration, bool audio);
     void waitForBackgroundWork(Backend &backend);
     bool installBrokenFfmpeg(const QString &dirPath);
 
@@ -216,26 +230,8 @@ void BackendTests::initTestCase() {
     QVERIFY2(m_dir.isValid(), "temporary directory is valid");
     m_videoPath = m_dir.filePath(QStringLiteral("clip.mp4"));
 
-    const QString ffmpeg = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
-    QVERIFY2(!ffmpeg.isEmpty(), "ffmpeg is available");
-
-    QProcess proc;
-    proc.start(ffmpeg, {
-        QStringLiteral("-hide_banner"),
-        QStringLiteral("-loglevel"),
-        QStringLiteral("error"),
-        QStringLiteral("-f"),
-        QStringLiteral("lavfi"),
-        QStringLiteral("-i"),
-        QStringLiteral("testsrc=size=32x32:rate=1:duration=1"),
-        QStringLiteral("-pix_fmt"),
-        QStringLiteral("yuv420p"),
-        QStringLiteral("-y"),
-        m_videoPath,
-    });
-    QVERIFY2(proc.waitForFinished(10000), qPrintable(QString::fromUtf8(proc.readAll())));
-    QCOMPARE(proc.exitStatus(), QProcess::NormalExit);
-    QCOMPARE(proc.exitCode(), 0);
+    QVERIFY2(!QStandardPaths::findExecutable(QStringLiteral("ffmpeg")).isEmpty(), "ffmpeg is available");
+    QVERIFY(!makeVideo(QStringLiteral("clip.mp4"), 1.0, false).isEmpty());
     QVERIFY(QFileInfo::exists(m_videoPath));
 }
 
@@ -383,20 +379,18 @@ void BackendTests::thumbnailWorkerStopsBlockedJobs() {
              qPrintable(QStringLiteral("worker stop took %1 ms").arg(elapsedMs)));
 }
 
-void BackendTests::exportDialogDelegatesSuggestedUrlAndRange() {
+void BackendTests::exportDialogDelegatesSuggestedUrl() {
     ThumbProvider provider;
     auto *picker = new FakeFilePicker;
     Backend backend(&provider, picker);
 
     QVERIFY(backend.load(videoUrl()));
     waitForBackgroundWork(backend);
-    backend.exportDialog(0.25, 0.75);
+    backend.exportDialog();
 
     QCOMPARE(picker->exportCount, 1);
     QCOMPARE(picker->lastSuggestedUrl,
              QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("clip_trimmed.mp4"))));
-    QCOMPARE(picker->lastStart, 0.25);
-    QCOMPARE(picker->lastEnd, 0.75);
 }
 
 void BackendTests::suggestedExportUrlAlwaysUsesMp4() {
@@ -430,7 +424,7 @@ void BackendTests::exportClipWritesMp4() {
 
     const QString selectedPath = m_dir.filePath(QStringLiteral("actual-export.webm"));
     const QString mp4Path = m_dir.filePath(QStringLiteral("actual-export.mp4"));
-    backend.exportClip(QUrl::fromLocalFile(selectedPath), 0.0, 1.0);
+    backend.exportClips(QUrl::fromLocalFile(selectedPath), edit::whole(1.0));
 
     QVERIFY(backend.busy());
     QCOMPARE(backend.status(), QStringLiteral("Exporting 0%"));
@@ -451,6 +445,69 @@ void BackendTests::exportClipWritesMp4() {
              qPrintable(formatName(mp4Path)));
 }
 
+QString BackendTests::makeVideo(const QString &name, double duration, bool audio) {
+    const QString path = m_dir.filePath(name);
+    QStringList args = {
+        QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
+        QStringLiteral("-f"), QStringLiteral("lavfi"),
+        QStringLiteral("-i"), QStringLiteral("testsrc=size=32x32:rate=1:duration=%1").arg(duration),
+    };
+    if (audio)
+        args << QStringLiteral("-f") << QStringLiteral("lavfi")
+             << QStringLiteral("-i") << QStringLiteral("sine=duration=%1").arg(duration)
+             << QStringLiteral("-c:a") << QStringLiteral("aac");
+    args << QStringLiteral("-pix_fmt") << QStringLiteral("yuv420p") << QStringLiteral("-y") << path;
+
+    QProcess proc;
+    proc.start(QStandardPaths::findExecutable(QStringLiteral("ffmpeg")), args);
+    if (!proc.waitForFinished(10000) || proc.exitStatus() != QProcess::NormalExit || proc.exitCode() != 0)
+        return {};
+    return path;
+}
+
+void BackendTests::exportKeepsOnlyTheClipsFromTheDialog() {
+    const QString sourcePath = makeVideo(QStringLiteral("spliced-source.mp4"), 3.0, true);
+    QVERIFY(!sourcePath.isEmpty());
+
+    ThumbProvider provider;
+    auto *picker = new FakeFilePicker;
+    Backend backend(&provider, picker);
+    QSignalSpy doneSpy(&backend, &Backend::exportDone);
+    QSignalSpy failedSpy(&backend, &Backend::exportFailed);
+
+    QVERIFY(backend.load(QUrl::fromLocalFile(sourcePath)));
+    waitForBackgroundWork(backend);
+
+    // Cut the middle second out: 0..1 and 2..3 survive.
+    Timeline *timeline = backend.timeline();
+    timeline->split(1.0);
+    timeline->split(2.0);
+    timeline->removeClip(1);
+    QCOMPARE(timeline->clips(), (edit::Clips{{0.0, 1.0}, {2.0, 3.0}}));
+    QVERIFY(timeline->unexported());
+
+    // Edits made while the dialog is open don't change what it exports.
+    backend.exportDialog();
+    const edit::Clips exported = timeline->clips();
+    timeline->removeClip(0);
+
+    const QString outPath = m_dir.filePath(QStringLiteral("spliced.mp4"));
+    emit picker->exportSelected(QUrl::fromLocalFile(outPath), 0);
+    QTRY_VERIFY_WITH_TIMEOUT(doneSpy.count() + failedSpy.count() > 0, 20000);
+    QCOMPARE(failedSpy.count(), 0);
+
+    const ffmpeg::VideoInfo info = ffmpeg::probe(outPath);
+    QVERIFY(info.ok);
+    QVERIFY(info.audio);
+    QVERIFY2(qAbs(info.duration - 2.0) < 0.15, qPrintable(QString::number(info.duration)));
+
+    // Only the exported clips count as exported.
+    QVERIFY(timeline->unexported());
+    timeline->undo();
+    QCOMPARE(timeline->clips(), exported);
+    QVERIFY(!timeline->unexported());
+}
+
 void BackendTests::exportClipCanReplaceSourceFile() {
     const QString sourcePath = m_dir.filePath(QStringLiteral("replace-source.mp4"));
     QVERIFY(QFile::copy(m_videoPath, sourcePath));
@@ -464,7 +521,7 @@ void BackendTests::exportClipCanReplaceSourceFile() {
     QVERIFY(backend.load(QUrl::fromLocalFile(sourcePath)));
     waitForBackgroundWork(backend);
 
-    backend.exportClip(QUrl::fromLocalFile(sourcePath), 0.0, 1.0);
+    backend.exportClips(QUrl::fromLocalFile(sourcePath), edit::whole(1.0));
 
     QVERIFY(backend.busy());
     QTRY_VERIFY_WITH_TIMEOUT(doneSpy.count() + failedSpy.count() > 0, 20000);
@@ -490,7 +547,7 @@ void BackendTests::exportZeroLengthClipFails() {
     waitForBackgroundWork(backend);
 
     const QString outPath = m_dir.filePath(QStringLiteral("empty-range.mp4"));
-    backend.exportClip(QUrl::fromLocalFile(outPath), 0.5, 0.5);
+    backend.exportClips(QUrl::fromLocalFile(outPath), {});
 
     QCOMPARE(failedSpy.count(), 1);
     QCOMPARE(doneSpy.count(), 0);
@@ -520,7 +577,7 @@ void BackendTests::exportRefusesRewrittenPathOverExistingFile() {
         existing.close();
     }
 
-    backend.exportClip(QUrl::fromLocalFile(selectedPath), 0.0, 1.0);
+    backend.exportClips(QUrl::fromLocalFile(selectedPath), edit::whole(1.0));
 
     QCOMPARE(failedSpy.count(), 1);
     QCOMPARE(doneSpy.count(), 0);
@@ -547,8 +604,8 @@ void BackendTests::exportStartFailureClearsBusy() {
     EnvVarGuard pathGuard("PATH");
     qputenv("PATH", QFile::encodeName(pathDir.path()) + ':' + qgetenv("PATH"));
 
-    backend.exportClip(QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("failed.mp4"))),
-                       0.0, 1.0);
+    backend.exportClips(QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("failed.mp4"))),
+                        edit::whole(1.0));
 
     QVERIFY(backend.busy());
     QTRY_COMPARE_WITH_TIMEOUT(failedSpy.count(), 1, 5000);
@@ -584,7 +641,7 @@ void BackendTests::failedExportPreservesExistingFile() {
     EnvVarGuard pathGuard("PATH");
     qputenv("PATH", QFile::encodeName(pathDir.path()) + ':' + qgetenv("PATH"));
 
-    backend.exportClip(QUrl::fromLocalFile(outPath), 0.0, 1.0);
+    backend.exportClips(QUrl::fromLocalFile(outPath), edit::whole(1.0));
     QTRY_COMPARE_WITH_TIMEOUT(failedSpy.count(), 1, 5000);
 
     // The original file survives untouched, and no temp part file is left behind.
@@ -630,167 +687,234 @@ void BackendTests::qmlShortcutsTriggerBackendActions() {
     QCOMPARE(backend.openCount, 1);
 }
 
+// Brings Main.qml up against the stub backend, loaded and focused, ready for keys.
+static QQuickWindow *showEditor(QmlHarness &harness, ShortcutBackend &backend) {
+    QQuickWindow *window = harness.window();
+    if (!window || !QTest::qWaitFor([window] { return window->property("audioOutputReady").toBool(); }, 3000))
+        return nullptr;
+    backend.announceInfo();
+    window->show();
+    window->requestActivate();
+    QTest::qWait(100);
+    return window;
+}
+
+static double playhead(QmlHarness &harness) {
+    return harness.editBar()->property("playheadSec").toDouble();
+}
+
 void BackendTests::qmlArrowKeysMoveThePlayhead() {
     ShortcutBackend backend(QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("shortcut-placeholder.mp4"))),
                             20.0);
     QmlHarness harness(backend);
-
-    QVERIFY2(harness.window(), qPrintable(mainQmlPath()));
-    QQuickWindow *window = harness.window();
-    QTRY_VERIFY_WITH_TIMEOUT(window->property("audioOutputReady").toBool(), 3000);
-
-    // The trim only spans the video once the backend reports what it loaded.
-    backend.announceInfo();
-    QQuickItem *trimBar = harness.trimBar();
-    QVERIFY(trimBar);
-    QCOMPARE(trimBar->property("endSec").toDouble(), 20.0);
-
-    window->show();
-    window->requestActivate();
-    QTest::qWait(100);
+    QQuickWindow *window = showEditor(harness, backend);
+    QVERIFY2(window, qPrintable(mainQmlPath()));
+    QVERIFY(harness.editBar());
+    QCOMPARE(backend.timeline.clips(), edit::whole(20.0));
 
     QTest::keyClick(window, Qt::Key_Right);
-    QTRY_COMPARE_WITH_TIMEOUT(trimBar->property("playheadSec").toDouble(), 1.0, 3000);
+    QTRY_COMPARE_WITH_TIMEOUT(playhead(harness), 1.0, 3000);
 
     QTest::keyClick(window, Qt::Key_Right, Qt::ShiftModifier);
-    QTRY_COMPARE_WITH_TIMEOUT(trimBar->property("playheadSec").toDouble(), 6.0, 3000);
+    QTRY_COMPARE_WITH_TIMEOUT(playhead(harness), 6.0, 3000);
 
     QTest::keyClick(window, Qt::Key_Right, Qt::AltModifier);
-    QTRY_COMPARE_WITH_TIMEOUT(trimBar->property("playheadSec").toDouble(), 6.2, 3000);
+    QTRY_COMPARE_WITH_TIMEOUT(playhead(harness), 6.2, 3000);
 
     QTest::keyClick(window, Qt::Key_Left, Qt::AltModifier);
-    QTRY_COMPARE_WITH_TIMEOUT(trimBar->property("playheadSec").toDouble(), 6.0, 3000);
+    QTRY_COMPARE_WITH_TIMEOUT(playhead(harness), 6.0, 3000);
 
     QTest::keyClick(window, Qt::Key_Left, Qt::ShiftModifier);
-    QTRY_COMPARE_WITH_TIMEOUT(trimBar->property("playheadSec").toDouble(), 1.0, 3000);
+    QTRY_COMPARE_WITH_TIMEOUT(playhead(harness), 1.0, 3000);
 
-    // Seeking never leaves the trim, so this stops at the start instead of -4.
+    // Seeking never leaves the video, so this stops at the start instead of -4.
     QTest::keyClick(window, Qt::Key_Left);
     QTest::keyClick(window, Qt::Key_Left, Qt::ShiftModifier);
-    QTRY_COMPARE_WITH_TIMEOUT(trimBar->property("playheadSec").toDouble(), 0.0, 3000);
+    QTRY_COMPARE_WITH_TIMEOUT(playhead(harness), 0.0, 3000);
 
     QTest::keyClick(window, Qt::Key_Right, Qt::ShiftModifier);
     QTest::keyClick(window, Qt::Key_Space, Qt::ControlModifier);
-    QTRY_COMPARE_WITH_TIMEOUT(trimBar->property("startSec").toDouble(), 5.0, 3000);
-    QCOMPARE(trimBar->property("endSec").toDouble(), 20.0);
+    QTRY_COMPARE_WITH_TIMEOUT(backend.timeline.clips(), (edit::Clips{{5.0, 20.0}}), 3000);
 }
 
-void BackendTests::qmlSpaceChordsSetTheTrimEdges() {
+void BackendTests::qmlSpaceChordsSetTheClipEdges() {
     ShortcutBackend backend(QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("shortcut-placeholder.mp4"))),
                             20.0);
     QmlHarness harness(backend);
-
-    QVERIFY2(harness.window(), qPrintable(mainQmlPath()));
-    QQuickWindow *window = harness.window();
-    QTRY_VERIFY_WITH_TIMEOUT(window->property("audioOutputReady").toBool(), 3000);
-
-    backend.announceInfo();
-    QQuickItem *trimBar = harness.trimBar();
-    QVERIFY(trimBar);
-
-    window->show();
-    window->requestActivate();
-    QTest::qWait(100);
+    QQuickWindow *window = showEditor(harness, backend);
+    QVERIFY2(window, qPrintable(mainQmlPath()));
 
     // Park the playhead at 15 s and pull the end in to it.
     for (int i = 0; i < 3; ++i)
         QTest::keyClick(window, Qt::Key_Right, Qt::ShiftModifier);
-    QTRY_COMPARE_WITH_TIMEOUT(trimBar->property("playheadSec").toDouble(), 15.0, 3000);
+    QTRY_COMPARE_WITH_TIMEOUT(playhead(harness), 15.0, 3000);
     QTest::keyClick(window, Qt::Key_Space, Qt::AltModifier);
-    QTRY_COMPARE_WITH_TIMEOUT(trimBar->property("endSec").toDouble(), 15.0, 3000);
+    QTRY_COMPARE_WITH_TIMEOUT(backend.timeline.clips(), (edit::Clips{{0.0, 15.0}}), 3000);
 
     // Same for the start, at 5 s.
     QTest::keyClick(window, Qt::Key_Left, Qt::ShiftModifier);
     QTest::keyClick(window, Qt::Key_Left, Qt::ShiftModifier);
-    QTRY_COMPARE_WITH_TIMEOUT(trimBar->property("playheadSec").toDouble(), 5.0, 3000);
+    QTRY_COMPARE_WITH_TIMEOUT(playhead(harness), 5.0, 3000);
     QTest::keyClick(window, Qt::Key_Space, Qt::ControlModifier);
-    QTRY_COMPARE_WITH_TIMEOUT(trimBar->property("startSec").toDouble(), 5.0, 3000);
+    QTRY_COMPARE_WITH_TIMEOUT(backend.timeline.clips(), (edit::Clips{{5.0, 15.0}}), 3000);
 
-    // The edges never cross: pulling the end onto the start stops 0.1 s past it.
+    // The edges never cross: pulling the end onto the start leaves the clip be.
     QTest::keyClick(window, Qt::Key_Space, Qt::AltModifier);
-    QTRY_COMPARE_WITH_TIMEOUT(trimBar->property("endSec").toDouble(), 5.1, 3000);
-    QCOMPARE(trimBar->property("startSec").toDouble(), 5.0);
+    QTest::qWait(50);
+    QCOMPARE(backend.timeline.clips(), (edit::Clips{{5.0, 15.0}}));
+
+    // In the cut tail, the clip before the playhead grows out to it.
+    QTest::keyClick(window, Qt::Key_Right, Qt::ShiftModifier);
+    QTest::keyClick(window, Qt::Key_Right, Qt::ShiftModifier);
+    for (int i = 0; i < 3; ++i)
+        QTest::keyClick(window, Qt::Key_Right);
+    QTRY_COMPARE_WITH_TIMEOUT(playhead(harness), 18.0, 3000);
+    QTest::keyClick(window, Qt::Key_Space, Qt::AltModifier);
+    QTRY_COMPARE_WITH_TIMEOUT(backend.timeline.clips(), (edit::Clips{{5.0, 18.0}}), 3000);
 }
 
-void BackendTests::qmlZoomFocusesTheSelection() {
+void BackendTests::qmlKeysSplitRemoveAndRestoreClips() {
     ShortcutBackend backend(QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("shortcut-placeholder.mp4"))),
                             20.0);
     QmlHarness harness(backend);
+    QQuickWindow *window = showEditor(harness, backend);
+    QVERIFY2(window, qPrintable(mainQmlPath()));
 
-    QVERIFY2(harness.window(), qPrintable(mainQmlPath()));
-    QQuickWindow *window = harness.window();
-    QTRY_VERIFY_WITH_TIMEOUT(window->property("audioOutputReady").toBool(), 3000);
+    // S splits the clip under the playhead, at 5 s and then at 10 s.
+    QTest::keyClick(window, Qt::Key_Right, Qt::ShiftModifier);
+    QTest::keyClick(window, Qt::Key_S);
+    QTRY_COMPARE_WITH_TIMEOUT(backend.timeline.clips(),
+                              (edit::Clips{{0.0, 5.0}, {5.0, 20.0}}), 3000);
+    QCOMPARE(window->property("unexported").toBool(), false);
+    QTest::keyClick(window, Qt::Key_Right, Qt::ShiftModifier);
+    QTest::keyClick(window, Qt::Key_S);
+    QTRY_COMPARE_WITH_TIMEOUT(backend.timeline.clips(),
+                              (edit::Clips{{0.0, 5.0}, {5.0, 10.0}, {10.0, 20.0}}), 3000);
 
-    backend.announceInfo();
-    QQuickItem *trimBar = harness.trimBar();
-    QVERIFY(trimBar);
+    // X removes the clip under the playhead...
+    QTest::keyClick(window, Qt::Key_X);
+    QTRY_COMPARE_WITH_TIMEOUT(backend.timeline.clips(),
+                              (edit::Clips{{0.0, 5.0}, {5.0, 10.0}}), 3000);
+    QTRY_COMPARE_WITH_TIMEOUT(window->property("unexported").toBool(), true, 3000);
 
-    window->show();
-    window->requestActivate();
-    QTest::qWait(100);
+    // ...and in a gap, restores it, growing the clip before it back out.
+    QTest::keyClick(window, Qt::Key_X);
+    QTRY_COMPARE_WITH_TIMEOUT(backend.timeline.clips(),
+                              (edit::Clips{{0.0, 5.0}, {5.0, 20.0}}), 3000);
 
-    // Trim to 5..15, then zoom: the selection fills 80% of the track, so the
-    // window stretches an extra eighth of the selection on each side.
+    // Delete removes too; a gap between clips restores by joining them.
+    QTest::keyClick(window, Qt::Key_Left, Qt::ShiftModifier);
+    QTest::keyClick(window, Qt::Key_Left, Qt::ShiftModifier);
+    QTRY_COMPARE_WITH_TIMEOUT(playhead(harness), 0.0, 3000);
+    QTest::keyClick(window, Qt::Key_Right, Qt::ShiftModifier);
+    QTest::keyClick(window, Qt::Key_S);
+    QTest::keyClick(window, Qt::Key_Right, Qt::ShiftModifier);
+    QTest::keyClick(window, Qt::Key_S);
+    QTest::keyClick(window, Qt::Key_Left);
+    QTest::keyClick(window, Qt::Key_Delete);
+    QTRY_COMPARE_WITH_TIMEOUT(backend.timeline.clips(),
+                              (edit::Clips{{0.0, 5.0}, {10.0, 20.0}}), 3000);
+    QTest::keyClick(window, Qt::Key_X);
+    QTRY_COMPARE_WITH_TIMEOUT(backend.timeline.clips(),
+                              (edit::Clips{{0.0, 20.0}}), 3000);
+
+    // Undo steps back through each edit; redo steps forward again.
+    QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
+    QTRY_COMPARE_WITH_TIMEOUT(backend.timeline.clips(),
+                              (edit::Clips{{0.0, 5.0}, {10.0, 20.0}}), 3000);
+    QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
+    QTRY_COMPARE_WITH_TIMEOUT(backend.timeline.clips(),
+                              (edit::Clips{{0.0, 5.0}, {5.0, 10.0}, {10.0, 20.0}}), 3000);
+    QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+    QTRY_COMPARE_WITH_TIMEOUT(backend.timeline.clips(),
+                              (edit::Clips{{0.0, 5.0}, {10.0, 20.0}}), 3000);
+}
+
+void BackendTests::qmlBracketsJumpBetweenClipEdges() {
+    ShortcutBackend backend(QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("shortcut-placeholder.mp4"))),
+                            20.0);
+    QmlHarness harness(backend);
+    QQuickWindow *window = showEditor(harness, backend);
+    QVERIFY2(window, qPrintable(mainQmlPath()));
+
+    backend.timeline.split(5.0);
+    backend.timeline.split(12.0);
+    QTest::keyClick(window, Qt::Key_Right);
+    QTRY_COMPARE_WITH_TIMEOUT(playhead(harness), 1.0, 3000);
+
+    QTest::keyClick(window, Qt::Key_BracketRight);
+    QTRY_COMPARE_WITH_TIMEOUT(playhead(harness), 5.0, 3000);
+    QTest::keyClick(window, Qt::Key_BracketRight);
+    QTRY_COMPARE_WITH_TIMEOUT(playhead(harness), 12.0, 3000);
+    QTest::keyClick(window, Qt::Key_BracketRight);
+    QTRY_COMPARE_WITH_TIMEOUT(playhead(harness), 20.0, 3000);
+    QTest::keyClick(window, Qt::Key_BracketLeft);
+    QTRY_COMPARE_WITH_TIMEOUT(playhead(harness), 12.0, 3000);
+    QTest::keyClick(window, Qt::Key_BracketLeft);
+    QTest::keyClick(window, Qt::Key_BracketLeft);
+    QTRY_COMPARE_WITH_TIMEOUT(playhead(harness), 0.0, 3000);
+}
+
+void BackendTests::qmlZoomFocusesTheClip() {
+    ShortcutBackend backend(QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("shortcut-placeholder.mp4"))),
+                            20.0);
+    QmlHarness harness(backend);
+    QQuickWindow *window = showEditor(harness, backend);
+    QVERIFY2(window, qPrintable(mainQmlPath()));
+    QQuickItem *editBar = harness.editBar();
+
+    // Trim to 5..15 and zoom from inside it: the clip fills 80% of the track,
+    // so the window stretches an extra eighth of the clip on each side.
     QTest::keyClick(window, Qt::Key_Right, Qt::ShiftModifier);
     QTest::keyClick(window, Qt::Key_Space, Qt::ControlModifier);
-    QTRY_COMPARE_WITH_TIMEOUT(trimBar->property("startSec").toDouble(), 5.0, 3000);
     QTest::keyClick(window, Qt::Key_Right, Qt::ShiftModifier);
     QTest::keyClick(window, Qt::Key_Right, Qt::ShiftModifier);
     QTest::keyClick(window, Qt::Key_Space, Qt::AltModifier);
-    QTRY_COMPARE_WITH_TIMEOUT(trimBar->property("endSec").toDouble(), 15.0, 3000);
+    QTRY_COMPARE_WITH_TIMEOUT(backend.timeline.clips(), (edit::Clips{{5.0, 15.0}}), 3000);
+    QTest::keyClick(window, Qt::Key_Left, Qt::ShiftModifier);
 
     QTest::keyClick(window, Qt::Key_Z);
-    QTRY_COMPARE_WITH_TIMEOUT(trimBar->property("zoomed").toBool(), true, 3000);
-    QCOMPARE(trimBar->property("viewStartSec").toDouble(), 3.75);
-    QCOMPARE(trimBar->property("viewEndSec").toDouble(), 16.25);
+    QTRY_COMPARE_WITH_TIMEOUT(editBar->property("zoomed").toBool(), true, 3000);
+    QCOMPARE(editBar->property("viewStartSec").toDouble(), 3.75);
+    QCOMPARE(editBar->property("viewEndSec").toDouble(), 16.25);
 
     // The filmstrip regenerates for the window, so the thumbs match the zoom.
     QCOMPARE(backend.thumbRequestCount, 1);
     QCOMPARE(backend.lastThumbStart, 3.75);
     QCOMPARE(backend.lastThumbEnd, 16.25);
 
-    // Tighten the trim while zoomed: end to the playhead at 10 s.
-    QTest::keyClick(window, Qt::Key_Left, Qt::ShiftModifier);
+    // Tighten the clip while zoomed: end to the playhead at 10 s.
     QTest::keyClick(window, Qt::Key_Space, Qt::AltModifier);
-    QTRY_COMPARE_WITH_TIMEOUT(trimBar->property("endSec").toDouble(), 10.0, 3000);
+    QTRY_COMPARE_WITH_TIMEOUT(backend.timeline.clips(), (edit::Clips{{5.0, 10.0}}), 3000);
+    QTest::keyClick(window, Qt::Key_Left);
 
-    // The selection changed since the zoom, so Z zooms again instead of out.
+    // The clip changed since the zoom, so Z zooms again instead of out.
     QTest::keyClick(window, Qt::Key_Z);
-    QTRY_COMPARE_WITH_TIMEOUT(trimBar->property("viewStartSec").toDouble(), 4.375, 3000);
-    QCOMPARE(trimBar->property("viewEndSec").toDouble(), 10.625);
-    QCOMPARE(trimBar->property("zoomed").toBool(), true);
+    QTRY_COMPARE_WITH_TIMEOUT(editBar->property("viewStartSec").toDouble(), 4.375, 3000);
+    QCOMPARE(editBar->property("viewEndSec").toDouble(), 10.625);
+    QCOMPARE(editBar->property("zoomed").toBool(), true);
     QCOMPARE(backend.thumbRequestCount, 2);
 
     // Untouched since the last zoom, so Z now zooms back out to the whole video.
     QTest::keyClick(window, Qt::Key_Z);
-    QTRY_COMPARE_WITH_TIMEOUT(trimBar->property("zoomed").toBool(), false, 3000);
+    QTRY_COMPARE_WITH_TIMEOUT(editBar->property("zoomed").toBool(), false, 3000);
     QCOMPARE(backend.thumbRequestCount, 3);
     QCOMPARE(backend.lastThumbStart, 0.0);
     QCOMPARE(backend.lastThumbEnd, 20.0);
 }
 
-void BackendTests::qmlQuitConfirmsUnexportedTrim() {
+void BackendTests::qmlQuitConfirmsUnexportedEdit() {
     ShortcutBackend backend(QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("shortcut-placeholder.mp4"))),
                             20.0);
     QmlHarness harness(backend);
-
-    QVERIFY2(harness.window(), qPrintable(mainQmlPath()));
-    QQuickWindow *window = harness.window();
-    QTRY_VERIFY_WITH_TIMEOUT(window->property("audioOutputReady").toBool(), 3000);
-
-    backend.announceInfo();
-    QQuickItem *trimBar = harness.trimBar();
-    QVERIFY(trimBar);
-
-    window->show();
-    window->requestActivate();
-    QTest::qWait(100);
+    QQuickWindow *window = showEditor(harness, backend);
+    QVERIFY2(window, qPrintable(mainQmlPath()));
 
     // Trim the video, making the work unexported: Q now asks instead of quitting.
     QTest::keyClick(window, Qt::Key_Right, Qt::ShiftModifier);
     QTest::keyClick(window, Qt::Key_Space, Qt::ControlModifier);
-    QTRY_COMPARE_WITH_TIMEOUT(trimBar->property("startSec").toDouble(), 5.0, 3000);
-    QTRY_COMPARE_WITH_TIMEOUT(window->property("trimDirty").toBool(), true, 3000);
+    QTRY_COMPARE_WITH_TIMEOUT(backend.timeline.clips(), (edit::Clips{{5.0, 20.0}}), 3000);
+    QTRY_COMPARE_WITH_TIMEOUT(window->property("unexported").toBool(), true, 3000);
 
     QTest::keyClick(window, Qt::Key_Q);
     QTRY_COMPARE_WITH_TIMEOUT(window->property("quitConfirmVisible").toBool(), true, 3000);
@@ -808,7 +932,7 @@ void BackendTests::qmlQuitConfirmsUnexportedTrim() {
     QTest::keyClick(window, Qt::Key_Return);
     QTRY_COMPARE_WITH_TIMEOUT(window->property("quitConfirmVisible").toBool(), false, 3000);
     QCOMPARE(backend.exportCount, 0);
-    QCOMPARE(trimBar->property("playheadSec").toDouble(), 5.0);
+    QCOMPARE(playhead(harness), 5.0);
 
     // Enter on the default Export focus exports, as does Ctrl+S.
     QTest::keyClick(window, Qt::Key_Q);
@@ -834,13 +958,13 @@ void BackendTests::qmlQuitConfirmsUnexportedTrim() {
     QTRY_COMPARE_WITH_TIMEOUT(backend.exportCount, 2, 3000);
     QCOMPARE(window->property("quitConfirmVisible").toBool(), false);
 
-    // A completed export cleans the trim; changing it again re-dirties.
+    // A completed export cleans the edit; changing it again re-dirties.
     backend.announceExportDone();
-    QTRY_COMPARE_WITH_TIMEOUT(window->property("trimDirty").toBool(), false, 3000);
+    QTRY_COMPARE_WITH_TIMEOUT(window->property("unexported").toBool(), false, 3000);
     QTest::keyClick(window, Qt::Key_Right, Qt::ShiftModifier);
     QTest::keyClick(window, Qt::Key_Space, Qt::AltModifier);
-    QTRY_COMPARE_WITH_TIMEOUT(trimBar->property("endSec").toDouble(), 10.0, 3000);
-    QTRY_COMPARE_WITH_TIMEOUT(window->property("trimDirty").toBool(), true, 3000);
+    QTRY_COMPARE_WITH_TIMEOUT(backend.timeline.clips(), (edit::Clips{{5.0, 10.0}}), 3000);
+    QTRY_COMPARE_WITH_TIMEOUT(window->property("unexported").toBool(), true, 3000);
 
     // Confirming the quit really ends the app: the window closes instead of
     // being re-intercepted by onClosing, and Qt.quit() is requested too.
@@ -853,15 +977,148 @@ void BackendTests::qmlQuitConfirmsUnexportedTrim() {
     QCOMPARE(quitSpy.count(), 1);
 }
 
+void BackendTests::timelineSplitsTrimsAndJoins() {
+    Timeline timeline;
+    timeline.reset(10.0);
+    QCOMPARE(timeline.clips(), edit::whole(10.0));
+
+    timeline.split(4.0);
+    QCOMPARE(timeline.clips(), (edit::Clips{{0.0, 4.0}, {4.0, 10.0}}));
+    // Too close to an edge to leave a clip worth keeping: no split.
+    timeline.split(4.05);
+    QCOMPARE(timeline.clips().size(), 2);
+
+    // A clip grows into a gap, never over its neighbour.
+    timeline.setClip(1, 6.0, 10.0);
+    QCOMPARE(timeline.clips(), (edit::Clips{{0.0, 4.0}, {6.0, 10.0}}));
+    timeline.setClip(1, 2.0, 10.0);
+    QCOMPARE(timeline.clips(), (edit::Clips{{0.0, 4.0}, {4.0, 10.0}}));
+    timeline.setClip(1, 6.0, 10.0);
+    QCOMPARE(timeline.keptDuration(), 8.0);
+    QCOMPARE(edit::kept(timeline.clips()), (QList<edit::Range>{{0.0, 4.0}, {6.0, 10.0}}));
+
+    // Joining restores what lay between; the last clip can't be removed.
+    timeline.joinClips(0);
+    QCOMPARE(timeline.clips(), edit::whole(10.0));
+    timeline.removeClip(0);
+    QCOMPARE(timeline.clips(), edit::whole(10.0));
+
+    // Touching clips export as one range.
+    timeline.split(5.0);
+    QCOMPARE(edit::kept(timeline.clips()), (QList<edit::Range>{{0.0, 10.0}}));
+}
+
+void BackendTests::timelineUndoesAGestureAsOneStep() {
+    Timeline timeline;
+    timeline.reset(10.0);
+    QVERIFY(!timeline.canUndo());
+
+    timeline.beginGesture();
+    timeline.setClip(0, 1.0, 10.0);
+    timeline.setClip(0, 2.0, 10.0);
+    timeline.setClip(0, 3.0, 10.0);
+    timeline.endGesture();
+    QCOMPARE(timeline.clips(), (edit::Clips{{3.0, 10.0}}));
+
+    timeline.undo();
+    QCOMPARE(timeline.clips(), edit::whole(10.0));
+    QVERIFY(!timeline.canUndo());
+    timeline.redo();
+    QCOMPARE(timeline.clips(), (edit::Clips{{3.0, 10.0}}));
+
+    // A new edit drops the redo history, and a reset drops it all.
+    timeline.undo();
+    timeline.split(5.0);
+    QVERIFY(!timeline.canRedo());
+    timeline.reset(10.0);
+    QVERIFY(!timeline.canUndo());
+}
+
+void BackendTests::timelineTracksUnexportedCuts() {
+    Timeline timeline;
+    timeline.reset(10.0);
+    // Splits alone cut nothing, so there's nothing to lose.
+    timeline.split(5.0);
+    QVERIFY(!timeline.unexported());
+
+    timeline.removeClip(1);
+    QVERIFY(timeline.unexported());
+    timeline.markExported(timeline.clips());
+    QVERIFY(!timeline.unexported());
+    timeline.undo();
+    timeline.redo();
+    QVERIFY(!timeline.unexported());
+}
+
+void BackendTests::timelineAnswersWhereTimesFall() {
+    Timeline timeline;
+    timeline.reset(20.0);
+    timeline.split(5.0);
+    timeline.split(10.0);
+    timeline.split(15.0);
+    timeline.removeClip(2);
+    // Clips 0..5, 5..10 and 15..20, with 10..15 cut.
+    QCOMPARE(timeline.clipAt(5.0), 1);
+    QCOMPARE(timeline.clipAt(12.0), -1);
+    QCOMPARE(timeline.gapAt(12.0), 2);
+    QCOMPARE(timeline.gapAt(20.0), 3);
+
+    // Playback steps over the gap and ends after the last clip.
+    QCOMPARE(timeline.playableFrom(3.0), 3.0);
+    QCOMPARE(timeline.playableFrom(12.0), 15.0);
+    QCOMPARE(timeline.playableFrom(19.99), -1.0);
+
+    QCOMPARE(timeline.edgeFrom(1.0, 1), 5.0);
+    QCOMPARE(timeline.edgeFrom(10.0, 1), 15.0);
+    QCOMPARE(timeline.edgeFrom(20.0, 1), 20.0);
+    QCOMPARE(timeline.edgeFrom(15.0, -1), 10.0);
+    QCOMPARE(timeline.edgeFrom(0.0, -1), 0.0);
+}
+
+void BackendTests::timelineEditsAtATime() {
+    Timeline timeline;
+    timeline.reset(20.0);
+    timeline.split(5.0);
+    timeline.split(10.0);
+
+    // Removing in a clip, then restoring the gap it leaves, round-trips.
+    timeline.removeOrRestoreAt(7.0);
+    QCOMPARE(timeline.clips(), (edit::Clips{{0.0, 5.0}, {10.0, 20.0}}));
+    timeline.removeOrRestoreAt(7.0);
+    QCOMPARE(timeline.clips(), (edit::Clips{{0.0, 20.0}}));
+
+    // Trimming in a clip moves its edge; in the head or tail, the next or
+    // previous clip grows back out.
+    timeline.trimTo(4.0, true);
+    timeline.trimTo(16.0, false);
+    QCOMPARE(timeline.clips(), (edit::Clips{{4.0, 16.0}}));
+    timeline.trimTo(2.0, true);
+    timeline.trimTo(18.0, false);
+    QCOMPARE(timeline.clips(), (edit::Clips{{2.0, 18.0}}));
+    timeline.restoreGap(0);
+    timeline.restoreGap(1);
+    QCOMPARE(timeline.clips(), edit::whole(20.0));
+
+    // Dragging an edge past the other stops a minimum clip short of it.
+    timeline.moveEdge(0, false, -3.0);
+    QCOMPARE(timeline.clips(), (edit::Clips{{0.0, edit::minimumClip}}));
+    timeline.moveEdge(0, true, 30.0);
+    QCOMPARE(timeline.clips(), (edit::Clips{{0.0, edit::minimumClip}}));
+}
+
 void BackendTests::trimArgsReencodeForPreciseCuts() {
     const QStringList args = ffmpeg::trimArgs(QStringLiteral("in.mp4"),
                                               QStringLiteral("out.mp4"),
-                                              0.25, 0.75);
+                                              {{0.25, 0.75}}, true);
 
     QVERIFY(args.contains(QStringLiteral("libx264")));
     QVERIFY(args.contains(QStringLiteral("aac")));
     QVERIFY(args.contains(QStringLiteral("+faststart")));
     QVERIFY(!args.contains(QStringLiteral("copy")));
+
+    // The range is a fast input seek bounded by its length.
+    const int seekAt = args.indexOf(QStringLiteral("-ss"));
+    QCOMPARE(args.mid(seekAt, 6), (QStringList{"-ss", "0.250", "-t", "0.500", "-i", "in.mp4"}));
 
     // Progress reporting goes to stdout so the UI can show a percentage.
     const int progressAt = args.indexOf(QStringLiteral("-progress"));
@@ -869,19 +1126,39 @@ void BackendTests::trimArgsReencodeForPreciseCuts() {
     QCOMPARE(args.value(progressAt + 1), QStringLiteral("pipe:1"));
 }
 
+void BackendTests::trimArgsConcatenateTheRanges() {
+    const QStringList args = ffmpeg::trimArgs(QStringLiteral("in.mp4"), QStringLiteral("out.mp4"),
+                                              {{0.0, 1.0}, {2.0, 3.5}}, true);
+    QCOMPARE(args.count(QStringLiteral("-i")), 2);
+    QCOMPARE(args.value(args.indexOf(QStringLiteral("-filter_complex")) + 1),
+             QStringLiteral("[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[v][a]"));
+    QVERIFY(args.contains(QStringLiteral("[a]")));
+
+    // Without audio, only the video is joined and mapped.
+    const QStringList silent = ffmpeg::trimArgs(QStringLiteral("in.mp4"), QStringLiteral("out.mp4"),
+                                                {{0.0, 1.0}, {2.0, 3.5}}, false);
+    QCOMPARE(silent.value(silent.indexOf(QStringLiteral("-filter_complex")) + 1),
+             QStringLiteral("[0:v:0][1:v:0]concat=n=2:v=1:a=0[v]"));
+    QVERIFY(!silent.contains(QStringLiteral("[a]")));
+    QVERIFY(!silent.contains(QStringLiteral("aac")));
+}
+
 void BackendTests::trimArgsScaleTheShorterSide() {
+    const auto graphOf = [](const QStringList &args) {
+        return args.value(args.indexOf(QStringLiteral("-filter_complex")) + 1);
+    };
+
     // No scale request, no scale filter.
-    QVERIFY(!ffmpeg::trimArgs(QStringLiteral("in.mp4"), QStringLiteral("out.mp4"), 0.0, 1.0)
-                 .contains(QStringLiteral("-vf")));
+    QVERIFY(!graphOf(ffmpeg::trimArgs(QStringLiteral("in.mp4"), QStringLiteral("out.mp4"),
+                                      {{0.0, 1.0}}, true))
+                 .contains(QStringLiteral("scale")));
 
     // The filter caps whichever side is shorter, keeping the aspect ratio for
     // portrait and landscape alike.
-    const QStringList args = ffmpeg::trimArgs(QStringLiteral("in.mp4"), QStringLiteral("out.mp4"),
-                                              0.0, 1.0, 1080);
-    const int vfAt = args.indexOf(QStringLiteral("-vf"));
-    QVERIFY(vfAt >= 0);
-    QCOMPARE(args.value(vfAt + 1),
-             QStringLiteral("scale='if(gt(iw,ih),-2,1080)':'if(gt(iw,ih),1080,-2)'"));
+    QCOMPARE(graphOf(ffmpeg::trimArgs(QStringLiteral("in.mp4"), QStringLiteral("out.mp4"),
+                                      {{0.0, 1.0}}, true, 1080)),
+             QStringLiteral("[0:v:0][0:a:0]concat=n=1:v=1:a=1[joined][a];"
+                            "[joined]scale='if(gt(iw,ih),-2,1080)':'if(gt(iw,ih),1080,-2)'[v]"));
 }
 
 void BackendTests::exportHeightsNeverUpscale() {

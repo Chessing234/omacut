@@ -9,6 +9,7 @@
 #include <QVector>
 
 #include "ffmpeg.h"
+#include "timeline.h"
 
 class ThumbProvider;
 class FilePicker;
@@ -27,6 +28,7 @@ class Backend : public QObject {
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
     Q_PROPERTY(QString themeAccent READ themeAccent NOTIFY themeAccentChanged)
     Q_PROPERTY(QString themeAccentForeground READ themeAccentForeground NOTIFY themeAccentChanged)
+    Q_PROPERTY(QObject *timeline READ timeline CONSTANT)
 
 public:
     explicit Backend(ThumbProvider *provider, QObject *parent = nullptr);
@@ -43,6 +45,7 @@ public:
     QString status() const { return m_status; }
     QString themeAccent() const { return m_themeAccent; }
     QString themeAccentForeground() const;
+    Timeline *timeline() { return &m_timeline; }
 
     // The accent from an omarchy colors.toml, or the fallback when the file is
     // missing or holds no usable accent — which is what keeps omacut working on
@@ -56,15 +59,15 @@ public:
 
     // Open native desktop file dialogs.
     Q_INVOKABLE void openVideoDialog();
-    Q_INVOKABLE void exportDialog(double start, double end);
+    // Exports the clips as they are when the dialog opens.
+    Q_INVOKABLE void exportDialog();
 
     // Suggested "<name>_trimmed.mp4" target next to the source.
     Q_INVOKABLE QUrl suggestedExportUrl() const;
 
-    // Write [start, end] (seconds) of the loaded video to dst. A non-zero
+    // Write what the clips keep of the loaded video to dst. A non-zero
     // scaleHeight downscales the shorter side to that size.
-    Q_INVOKABLE void exportClip(const QUrl &dst, double start, double end,
-                                int scaleHeight = 0);
+    void exportClips(const QUrl &dst, const edit::Clips &clips, int scaleHeight = 0);
 
     // The downscale heights worth offering for a source: only ones strictly
     // below the source's shorter side, so exports never upscale.
@@ -98,6 +101,8 @@ private:
     ThumbProvider *m_provider;
     FilePicker *m_filePicker;
     ThumbWorker *m_thumbWorker = nullptr;
+    Timeline m_timeline;
+    edit::Clips m_exportDialogClips;
     ffmpeg::VideoInfo m_info;
     QString m_path;
     QUrl m_source;

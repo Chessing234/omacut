@@ -1,10 +1,21 @@
 # Omacut
 
-A dead-simple video **length** trimmer. Open a video, drag the two handles to pick a start and end, preview the clip, and export. On Omarchy, the interface follows your theme's accent color.
+A dead-simple video trimmer. Open a video, trim either end, split it into clips and cut ranges out of the middle, preview the result, and export. On Omarchy, the interface follows your theme's accent color.
 
 Built using **Qt Quick (QML)** UI with the Material style — the same Qt stack Quickshell builds on — and **ffmpeg** for the cut. The C++ side compiles to a single executable; the QML is embedded in it via Qt resources.
 
 <img width="3227" height="3227" alt="screenshot-2026-06-23_15-20-40" src="https://github.com/user-attachments/assets/c76047c8-618f-4c1c-91f9-e7024c4f953b" />
+
+## Editing
+
+The timeline shows your video as one or more clips, each framed with a handle at both ends. Whatever falls outside every clip is cut. Playback plays the clips in order and skips the gaps.
+
+- **Double-click a clip** to split it there.
+- **Drag a handle** to trim that clip. Dragging the handles at a split apart removes the part between them.
+- **Double-click a gap**, or the line between two touching clips, to join them again.
+- **Hover a clip** and click its **×** to remove it.
+
+Handles catch on neighbouring clips and the playhead.
 
 ## Hotkeys
 
@@ -12,12 +23,16 @@ Built using **Qt Quick (QML)** UI with the Material style — the same Qt stack 
 - *Left/Right*: Move the playhead by 1 second.
 - *Shift+Left/Right*: Move the playhead by 5 seconds.
 - *Alt+Left/Right*: Move the playhead by 0.2 seconds.
-- *Ctrl+Space*: Move the start of the trim to the playhead.
-- *Alt+Space*: Move the end of the trim to the playhead.
-- *Z*: Zoom into the trimmed selection for fine tuning (Z again zooms back out).
+- *[ / ]*: Jump to the previous / next clip edge.
+- *S*: Split the clip at the playhead.
+- *X, Delete*: Remove the clip under the playhead; in a gap, restore it.
+- *Ctrl+Space*: Move the start of the clip under the playhead to the playhead.
+- *Alt+Space*: Move the end of the clip under the playhead to the playhead.
+- *Ctrl+Z / Ctrl+Shift+Z*: Undo / redo.
+- *Z*: Zoom to the clip under the playhead for fine tuning (Z again zooms back out).
 - *Ctrl+O*: Open a new file to trim.
-- *Ctrl+S*: Export the current trim.
-- *Q*: Quit (asks first if the trim hasn't been exported).
+- *Ctrl+S*: Export the current edit.
+- *Q*: Quit (asks first if the edit hasn't been exported).
 - *?*: Show the hotkeys in the app.
 
 ## Install

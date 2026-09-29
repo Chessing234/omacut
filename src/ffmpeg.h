@@ -6,6 +6,8 @@
 
 #include <atomic>
 
+#include "edit.h"
+
 // Thin wrappers around the ffmpeg/ffprobe command-line tools.
 namespace ffmpeg {
 
@@ -14,6 +16,7 @@ struct VideoInfo {
     double duration = 0.0;  // seconds
     int width = 0;
     int height = 0;
+    bool audio = false;
     bool ok = false;
     QString error;
 };
@@ -27,12 +30,12 @@ VideoInfo probe(const QString &path);
 QImage thumbnail(const QString &path, double time, int height = 90,
                  const std::atomic<bool> *cancel = nullptr);
 
-// Build the ffmpeg argument list that writes [start, end] of src to dst.
-// Cuts are frame-accurate and re-encoded with libx264/aac. A non-zero
+// Build the ffmpeg argument list that writes the ranges of src, back to back,
+// to dst. Cuts are frame-accurate and re-encoded with libx264/aac. A non-zero
 // scaleHeight downscales so the shorter side becomes scaleHeight (1080p of a
 // portrait video is 1080 wide), always preserving the aspect ratio.
-QStringList trimArgs(const QString &src, const QString &dst, double start, double end,
-                     int scaleHeight = 0);
+QStringList trimArgs(const QString &src, const QString &dst,
+                     const QList<edit::Range> &ranges, bool audio, int scaleHeight = 0);
 
 // Locate a tool on PATH; returns empty string if missing.
 QString toolPath(const QString &tool);

@@ -23,15 +23,12 @@ ApplicationWindow {
     property bool quitConfirmVisible: false
     readonly property string statusText: noticeText !== "" ? noticeText : backend.status
 
-    // What the last export wrote, so quitting only warns about unexported work.
-    // A trim spanning the whole video is never dirty — that's just the source.
-    property real exportedStartSec: -1
-    property real exportedEndSec: -1
-    property real pendingExportStartSec: 0
-    property real pendingExportEndSec: 0
-    readonly property bool trimDirty: hasVideo && backend.duration > 0
-        && (trimBar.startSec > 0 || trimBar.endSec < backend.duration)
-        && (trimBar.startSec !== exportedStartSec || trimBar.endSec !== exportedEndSec)
+    readonly property var timeline: backend.timeline
+    // Quitting only warns about unexported cuts. Clips spanning the whole
+    // video are never dirty — that's just the source.
+    readonly property bool unexported: hasVideo && timeline.unexported
+    // Editing shortcuts go quiet while a dialog is up or a handle is dragged.
+    readonly property bool editing: hasVideo && backend.duration > 0 && !quitConfirmVisible && !editBar.interacting
 
     Material.theme: Material.Dark
     Material.accent: win.accent
@@ -51,9 +48,8 @@ ApplicationWindow {
     function exportVideo() {
         if (!win.hasVideo || backend.duration <= 0 || backend.busy)
             return;
-        pendingExportStartSec = trimBar.startSec;
-        pendingExportEndSec = trimBar.endSec;
-        backend.exportDialog(trimBar.startSec, trimBar.endSec);
+        player.pause();
+        backend.exportDialog();
     }
     function ensureAudioOutput() {
         if (audioOutput === null && win.hasVideo)
@@ -76,48 +72,24 @@ ApplicationWindow {
             player.pause();
             return;
         }
-        // The pause-at-end clamp rounds to whole milliseconds and the player
-        // snaps seeks to frames, so a finished clip can rest a fraction of a
-        // millisecond before endSec. Treat anything within 10 ms of the end
-        // as "at the end" or play would instantly re-pause instead of
-        // restarting from the trim start.
-        var pos = player.position / 1000;
-        if (pos < trimBar.startSec || pos >= trimBar.endSec - 0.01)
-            player.position = Math.round(trimBar.startSec * 1000);
+        // Play only the clips: from the playhead if it's in one, else from
+        // the next clip, and from the top once past the last.
+        var from = timeline.playableFrom(editBar.playheadSec);
+        seekTo(from < 0 ? timeline.edgeFrom(0, -1) : from);
         player.play();
     }
-    function movePlayheadTo(seconds) {
+    function seekTo(seconds) {
+        if (!win.hasVideo || backend.duration <= 0)
+            return;
         if (player.priming)
             player.finishPriming();
-        trimBar.playheadSec = seconds;
-        player.position = Math.round(seconds * 1000);
-    }
-    function seekBy(seconds) {
-        if (!win.hasVideo || backend.duration <= 0)
-            return;
-        // The playhead lives inside the trim, same as scrubbing and preview.
-        movePlayheadTo(Math.max(trimBar.startSec, Math.min(trimBar.playheadSec + seconds, trimBar.endSec)));
-    }
-    // Both edges park the playhead on themselves, so you see the frame you just
-    // trimmed to — the same thing dragging a handle does. While zoomed, the
-    // edges stop at the zoom window instead of the video bounds.
-    function moveTrimStartTo(seconds) {
-        if (!win.hasVideo || backend.duration <= 0)
-            return;
-        var minGap = Math.min(0.1, backend.duration);
-        trimBar.startSec = Math.max(trimBar.windowStart, Math.min(seconds, trimBar.endSec - minGap));
-        movePlayheadTo(trimBar.startSec);
-    }
-    function moveTrimEndTo(seconds) {
-        if (!win.hasVideo || backend.duration <= 0)
-            return;
-        var minGap = Math.min(0.1, backend.duration);
-        trimBar.endSec = Math.min(trimBar.windowEnd, Math.max(seconds, trimBar.startSec + minGap));
-        movePlayheadTo(trimBar.endSec);
+        var t = Math.max(0, Math.min(seconds, backend.duration));
+        editBar.playheadSec = t;
+        player.position = Math.round(t * 1000);
     }
     property bool quitting: false
     function requestQuit() {
-        if (trimDirty) {
+        if (unexported) {
             if (player.playbackState === MediaPlayer.PlayingState)
                 player.pause();
             quitConfirmVisible = true;
@@ -148,7 +120,7 @@ ApplicationWindow {
     onClosing: (close) => {
         if (win.quitting)
             return;
-        if (win.trimDirty) {
+        if (win.unexported) {
             close.accepted = false;
             if (player.playbackState === MediaPlayer.PlayingState)
                 player.pause();
@@ -158,7 +130,7 @@ ApplicationWindow {
         forceQuit();
     }
 
-    // The playback and trim shortcuts go quiet while the quit confirmation is
+    // The playback and editing shortcuts go quiet while the quit confirmation is
     // up — a disabled Shortcut also stops swallowing its key, which lets the
     // dialog's own keyboard navigation receive the arrows, Space and Enter.
     Shortcut {
@@ -169,69 +141,119 @@ ApplicationWindow {
     }
 
     Shortcut {
-        sequence: "Ctrl+Space"
-        context: Qt.ApplicationShortcut
-        enabled: win.hasVideo && !win.quitConfirmVisible
-        onActivated: moveTrimStartTo(trimBar.playheadSec)
-    }
-
-    Shortcut {
-        sequence: "Alt+Space"
-        context: Qt.ApplicationShortcut
-        enabled: win.hasVideo && !win.quitConfirmVisible
-        onActivated: moveTrimEndTo(trimBar.playheadSec)
-    }
-
-    Shortcut {
         sequence: "Left"
         context: Qt.ApplicationShortcut
-        enabled: win.hasVideo && !win.quitConfirmVisible
-        onActivated: seekBy(-1)
+        enabled: win.editing
+        onActivated: seekTo(editBar.playheadSec - 1)
     }
 
     Shortcut {
         sequence: "Right"
         context: Qt.ApplicationShortcut
-        enabled: win.hasVideo && !win.quitConfirmVisible
-        onActivated: seekBy(1)
+        enabled: win.editing
+        onActivated: seekTo(editBar.playheadSec + 1)
     }
 
     Shortcut {
         sequence: "Shift+Left"
         context: Qt.ApplicationShortcut
-        enabled: win.hasVideo && !win.quitConfirmVisible
-        onActivated: seekBy(-5)
+        enabled: win.editing
+        onActivated: seekTo(editBar.playheadSec - 5)
     }
 
     Shortcut {
         sequence: "Shift+Right"
         context: Qt.ApplicationShortcut
-        enabled: win.hasVideo && !win.quitConfirmVisible
-        onActivated: seekBy(5)
+        enabled: win.editing
+        onActivated: seekTo(editBar.playheadSec + 5)
     }
 
     Shortcut {
         sequence: "Alt+Left"
         context: Qt.ApplicationShortcut
-        enabled: win.hasVideo && !win.quitConfirmVisible
-        onActivated: seekBy(-0.2)
+        enabled: win.editing
+        onActivated: seekTo(editBar.playheadSec - 0.2)
     }
 
     Shortcut {
         sequence: "Alt+Right"
         context: Qt.ApplicationShortcut
-        enabled: win.hasVideo && !win.quitConfirmVisible
-        onActivated: seekBy(0.2)
+        enabled: win.editing
+        onActivated: seekTo(editBar.playheadSec + 0.2)
+    }
+
+    Shortcut {
+        sequence: "["
+        context: Qt.ApplicationShortcut
+        enabled: win.editing
+        onActivated: {
+            player.pause();
+            seekTo(timeline.edgeFrom(editBar.playheadSec, -1));
+        }
+    }
+
+    Shortcut {
+        sequence: "]"
+        context: Qt.ApplicationShortcut
+        enabled: win.editing
+        onActivated: {
+            player.pause();
+            seekTo(timeline.edgeFrom(editBar.playheadSec, 1));
+        }
+    }
+
+    Shortcut {
+        sequence: "S"
+        context: Qt.ApplicationShortcut
+        autoRepeat: false
+        enabled: win.editing
+        onActivated: timeline.split(editBar.playheadSec)
+    }
+
+    Shortcut {
+        sequences: ["X", "Delete", "Backspace"]
+        context: Qt.ApplicationShortcut
+        autoRepeat: false
+        enabled: win.editing
+        onActivated: timeline.removeOrRestoreAt(editBar.playheadSec)
+    }
+
+    Shortcut {
+        sequence: "Ctrl+Space"
+        context: Qt.ApplicationShortcut
+        autoRepeat: false
+        enabled: win.editing
+        onActivated: timeline.trimTo(editBar.playheadSec, true)
+    }
+
+    Shortcut {
+        sequence: "Alt+Space"
+        context: Qt.ApplicationShortcut
+        autoRepeat: false
+        enabled: win.editing
+        onActivated: timeline.trimTo(editBar.playheadSec, false)
     }
 
     Shortcut {
         sequence: "Z"
         context: Qt.ApplicationShortcut
-        enabled: win.hasVideo && backend.duration > 0 && !win.quitConfirmVisible
-        onActivated: {
-            trimBar.toggleZoom();
-            backend.requestThumbs(trimBar.windowStart, trimBar.windowEnd);
-        }
+        autoRepeat: false
+        enabled: win.editing
+        onActivated: editBar.toggleZoom()
+    }
+
+    Shortcut {
+        sequence: "Ctrl+Z"
+        context: Qt.ApplicationShortcut
+        enabled: win.editing && timeline.canUndo
+        onActivated: timeline.undo()
+    }
+
+    Shortcut {
+        sequences: ["Ctrl+Shift+Z", "Ctrl+Y"]
+        context: Qt.ApplicationShortcut
+        enabled: win.editing && timeline.canRedo
+        onActivated: timeline.redo()
     }
 
     Shortcut {
@@ -320,13 +342,23 @@ ApplicationWindow {
                 finishPriming();
                 return;
             }
-            // Stop at the trim end, like a clip preview.
-            if (playbackState === MediaPlayer.PlayingState && position / 1000 >= trimBar.endSec) {
-                pause();
-                position = Math.round(trimBar.endSec * 1000);
+            // Play only the clips: hop over gaps and stop after the last clip.
+            if (playbackState === MediaPlayer.PlayingState) {
+                var t = position / 1000, next = timeline.playableFrom(t);
+                // Past the last clip: stop where we are. Seeking to its end
+                // could land past the final frame.
+                if (next < 0) {
+                    pause();
+                    editBar.playheadSec = timeline.edgeFrom(backend.duration, 1);
+                    return;
+                }
+                if (next - t > 0.05) {
+                    position = Math.round(next * 1000);
+                    return;
+                }
             }
-            if (!trimBar.interacting)
-                trimBar.playheadSec = position / 1000;
+            if (!editBar.interacting)
+                editBar.playheadSec = position / 1000;
         }
     }
 
@@ -530,16 +562,16 @@ ApplicationWindow {
                 onClicked: togglePlay()
             }
 
-            TrimBar {
-                id: trimBar
-                objectName: "trimBar"
+            EditBar {
+                id: editBar
+                objectName: "editBar"
                 Layout.fillWidth: true
                 accent: win.accent
-                durationSec: backend.duration
-                thumbCount: backend.thumbCount
-                thumbReadyCount: backend.thumbReadyCount
-                thumbRevision: backend.thumbRevision
-                onScrub: (seconds) => player.position = Math.round(seconds * 1000)
+                accentForeground: win.accentForeground
+                onScrub: (seconds) => {
+                    player.pause();
+                    seekTo(seconds);
+                }
             }
 
             IconButton {
@@ -573,10 +605,10 @@ ApplicationWindow {
 
             Label {
                 anchors.centerIn: parent
-                visible: win.statusText === "" && backend.duration > 0 && !trimBar.trimmingRange
+                visible: win.statusText === "" && backend.duration > 0 && !editBar.trimming
                 textFormat: Text.StyledText
-                text: Format.fmt(trimBar.playheadSec) + " (" + Format.fmt(trimBar.endSec - trimBar.startSec) + ")"
-                    + (trimBar.zoomed ? " · <font color=\"" + win.accent + "\">zoomed</font>" : "")
+                text: Format.fmt(editBar.playheadSec) + " (" + Format.fmt(win.timeline.keptDuration) + ")"
+                    + (editBar.zoomed ? " · <font color=\"" + win.accent + "\">zoomed</font>" : "")
                 color: "#d6d6da"
                 font.pixelSize: 13
                 font.family: "monospace"
@@ -647,9 +679,13 @@ ApplicationWindow {
                         { keys: "← / →", action: "Move playhead 1s" },
                         { keys: "Shift ← / →", action: "Move playhead 5s" },
                         { keys: "Alt ← / →", action: "Move playhead 0.2s" },
-                        { keys: "Ctrl Space", action: "Trim start to playhead" },
-                        { keys: "Alt Space", action: "Trim end to playhead" },
-                        { keys: "Z", action: "Zoom the selection" },
+                        { keys: "[ / ]", action: "Previous / next clip edge" },
+                        { keys: "S", action: "Split the clip at the playhead" },
+                        { keys: "X", action: "Remove the clip, or restore the gap" },
+                        { keys: "Ctrl Space", action: "Clip start to playhead" },
+                        { keys: "Alt Space", action: "Clip end to playhead" },
+                        { keys: "Ctrl Z", action: "Undo (Ctrl Shift Z redo)" },
+                        { keys: "Z", action: "Zoom to the clip" },
                         { keys: "Ctrl O", action: "Open a video" },
                         { keys: "Ctrl S", action: "Export" },
                         { keys: "Q", action: "Quit" },
@@ -708,14 +744,14 @@ ApplicationWindow {
                 spacing: 8
 
                 Label {
-                    text: "Unexported trim"
+                    text: "Unexported edit"
                     color: "white"
                     font.pixelSize: 16
                     font.weight: Font.DemiBold
                 }
 
                 Label {
-                    text: "Your trim hasn't been exported. Quit anyway?"
+                    text: "Your edit hasn't been exported. Quit anyway?"
                     color: "#d6d6da"
                     font.pixelSize: 13
                     bottomPadding: 12
@@ -771,16 +807,10 @@ ApplicationWindow {
             primeFallback.stop();
             player.priming = false;
             player.primed = false;
-            trimBar.zoomed = false;
-            trimBar.startSec = 0;
-            trimBar.endSec = backend.duration;
-            trimBar.playheadSec = 0;
-            win.exportedStartSec = -1;
-            win.exportedEndSec = -1;
+            editBar.zoomed = false;
+            editBar.playheadSec = 0;
         }
         function onExportDone(path) {
-            win.exportedStartSec = win.pendingExportStartSec;
-            win.exportedEndSec = win.pendingExportEndSec;
             win.showNotice("Saved " + path);
         }
         function onExportFailed(message) {

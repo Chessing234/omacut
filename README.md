@@ -1,6 +1,6 @@
 # Omacut
 
-A dead-simple video trimmer. Open a video, trim either end, split it into clips and cut ranges out of the middle, preview the result, and export. On Omarchy, the interface follows your theme's accent color.
+A dead-simple video editor. Open a video, trim either end, split it into clips and cut pieces out, add more videos and put the clips in any order, preview the result, and export. On Omarchy, the interface follows your theme's accent color.
 
 Built using **Qt Quick (QML)** UI with the Material style — the same Qt stack Quickshell builds on — and **ffmpeg** for the cut. The C++ side compiles to a single executable; the QML is embedded in it via Qt resources.
 
@@ -8,14 +8,16 @@ Built using **Qt Quick (QML)** UI with the Material style — the same Qt stack 
 
 ## Editing
 
-The timeline shows your video as one or more clips, each framed with a handle at both ends. Whatever falls outside every clip is cut. Playback plays the clips in order and skips the gaps.
+The timeline shows your clips back to back, in the order they play, each framed with a handle at both ends over its own filmstrip. Whatever isn't in a clip is cut.
 
 - **Double-click a clip** to split it there.
-- **Drag a handle** to trim that clip. Dragging the handles at a split apart removes the part between them.
-- **Double-click a gap**, or the line between two touching clips, to join them again.
+- **Drag a handle** to trim that clip. A trimmed clip can grow back into its video, up to either end.
+- **Double-click the line** between two pieces of the same stretch of video to join them again.
+- **Hold a clip, then drag it** to move it before or after the others.
 - **Hover a clip** and click its **×** to remove it.
+- **Click +** to add another video after the clip under the playhead.
 
-Handles catch on neighbouring clips and the playhead.
+Handles catch on neighbouring clip edges and the playhead.
 
 ## Hotkeys
 
@@ -25,12 +27,14 @@ Handles catch on neighbouring clips and the playhead.
 - *Alt+Left/Right*: Move the playhead by 0.2 seconds.
 - *[ / ]*: Jump to the previous / next clip edge.
 - *S*: Split the clip at the playhead.
-- *X, Delete*: Remove the clip under the playhead; in a gap, restore it.
+- *X, Delete*: Remove the clip under the playhead.
+- *Alt+[ / Alt+]*: Move the clip under the playhead earlier / later.
 - *Ctrl+Space*: Move the start of the clip under the playhead to the playhead.
 - *Alt+Space*: Move the end of the clip under the playhead to the playhead.
 - *Ctrl+Z / Ctrl+Shift+Z*: Undo / redo.
 - *Z*: Zoom to the clip under the playhead for fine tuning (Z again zooms back out).
-- *Ctrl+O*: Open a new file to trim.
+- *Ctrl+O*: Open a new file to edit.
+- *Ctrl+Shift+O*: Add a video after the clip under the playhead.
 - *Ctrl+S*: Export the current edit.
 - *Q*: Quit (asks first if the edit hasn't been exported).
 - *?*: Show the hotkeys in the app.
@@ -44,7 +48,7 @@ Install via the Omarchy Package Repository via the `omacut` package. It's instal
 - `xdg-desktop-portal` and a portal backend for the file picker
 - `ffmpeg` and `ffprobe` on your PATH (used at runtime)
 
-Exports are always written as MP4 files, regardless of the input video's container. The export dialog offers Original/1080p/720p quality — never upscaling, and always preserving the aspect ratio.
+Exports are always written as MP4 files, regardless of the input video's container. The export dialog offers Original/1080p/720p quality — never upscaling, and always preserving the aspect ratio. When clips come from different videos, the export takes the frame size of the first clip's video; clips of another shape are letterboxed into it, and videos without sound get silence.
 
 ## Build
 

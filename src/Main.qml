@@ -24,11 +24,11 @@ ApplicationWindow {
     readonly property string statusText: noticeText !== "" ? noticeText : backend.status
 
     readonly property var timeline: backend.timeline
-    // Quitting only warns about unexported cuts. Clips spanning the whole
-    // video are never dirty — that's just the source.
+    // Quitting only warns about unexported edits. One clip spanning the whole
+    // first video is never dirty — that's just the source.
     readonly property bool unexported: hasVideo && timeline.unexported
     // Editing shortcuts go quiet while a dialog is up or a handle is dragged.
-    readonly property bool editing: hasVideo && backend.duration > 0 && !quitConfirmVisible && !editBar.interacting
+    readonly property bool editing: hasVideo && timeline.duration > 0 && !quitConfirmVisible && !editBar.interacting
 
     Material.theme: Material.Dark
     Material.accent: win.accent
@@ -45,8 +45,12 @@ ApplicationWindow {
     function openVideo() {
         backend.openVideoDialog();
     }
+    function addVideo() {
+        player.pause();
+        backend.addVideoDialog(editBar.playheadSec);
+    }
     function exportVideo() {
-        if (!win.hasVideo || backend.duration <= 0 || backend.busy)
+        if (!win.hasVideo || timeline.duration <= 0 || backend.busy)
             return;
         player.pause();
         backend.exportDialog();
@@ -62,30 +66,40 @@ ApplicationWindow {
         audioOutput = null;
         oldAudioOutput.destroy();
     }
+    function playing() {
+        return player.playbackState === MediaPlayer.PlayingState && !player.priming;
+    }
     function togglePlay() {
-        if (!win.hasVideo || backend.duration <= 0)
+        if (!win.hasVideo || timeline.duration <= 0)
             return;
         ensureAudioOutput();
-        if (player.priming)
-            player.finishPriming();
-        if (player.playbackState === MediaPlayer.PlayingState) {
+        if (playing()) {
             player.pause();
             return;
         }
-        // Play only the clips: from the playhead if it's in one, else from
-        // the next clip, and from the top once past the last.
-        var from = timeline.playableFrom(editBar.playheadSec);
-        seekTo(from < 0 ? timeline.edgeFrom(0, -1) : from);
-        player.play();
+        // From the playhead, or from the top once at the end.
+        var t = editBar.playheadSec >= timeline.duration - 0.03 ? 0 : editBar.playheadSec;
+        var i = timeline.clipAt(t), clip = timeline.clips[i];
+        editBar.playheadSec = t;
+        player.show(i, clip.in + t - clip.start, true);
     }
     function seekTo(seconds) {
-        if (!win.hasVideo || backend.duration <= 0)
+        if (!win.hasVideo || timeline.duration <= 0)
             return;
-        if (player.priming)
-            player.finishPriming();
-        var t = Math.max(0, Math.min(seconds, backend.duration));
+        var t = Math.max(0, Math.min(seconds, timeline.duration));
+        var i = timeline.clipAt(t), clip = timeline.clips[i];
         editBar.playheadSec = t;
-        player.position = Math.round(t * 1000);
+        player.show(i, clip.in + t - clip.start, playing());
+    }
+    // Moves the clip under the playhead one place earlier or later, keeping
+    // the playhead on the same frame of it.
+    function moveClipBy(direction) {
+        var t = editBar.playheadSec, i = timeline.clipAt(t);
+        var into = t - timeline.clipStart(i);
+        if (i + direction < 0 || i + direction >= timeline.clips.length)
+            return;
+        timeline.moveClip(i, i + direction);
+        seekTo(timeline.clipStart(i + direction) + into);
     }
     property bool quitting: false
     function requestQuit() {
@@ -203,6 +217,20 @@ ApplicationWindow {
     }
 
     Shortcut {
+        sequence: "Alt+["
+        context: Qt.ApplicationShortcut
+        enabled: win.editing
+        onActivated: moveClipBy(-1)
+    }
+
+    Shortcut {
+        sequence: "Alt+]"
+        context: Qt.ApplicationShortcut
+        enabled: win.editing
+        onActivated: moveClipBy(1)
+    }
+
+    Shortcut {
         sequence: "S"
         context: Qt.ApplicationShortcut
         autoRepeat: false
@@ -215,7 +243,7 @@ ApplicationWindow {
         context: Qt.ApplicationShortcut
         autoRepeat: false
         enabled: win.editing
-        onActivated: timeline.removeOrRestoreAt(editBar.playheadSec)
+        onActivated: timeline.removeAt(editBar.playheadSec)
     }
 
     Shortcut {
@@ -259,7 +287,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "Ctrl+S"
         context: Qt.ApplicationShortcut
-        enabled: win.hasVideo && backend.duration > 0 && !backend.busy
+        enabled: win.hasVideo && timeline.duration > 0 && !backend.busy
         onActivated: {
             win.quitConfirmVisible = false;
             exportVideo();
@@ -271,6 +299,13 @@ ApplicationWindow {
         context: Qt.ApplicationShortcut
         enabled: !win.quitConfirmVisible
         onActivated: openVideo()
+    }
+
+    Shortcut {
+        sequence: "Ctrl+Shift+O"
+        context: Qt.ApplicationShortcut
+        enabled: win.editing
+        onActivated: addVideo()
     }
 
     Shortcut {
@@ -304,22 +339,47 @@ ApplicationWindow {
 
     MediaPlayer {
         id: player
-        source: backend.source
         videoOutput: videoOut
         audioOutput: win.audioOutput
 
-        // Render the opening frame on load instead of showing black. Playback
-        // starts muted and stops as soon as VideoOutput receives a frame.
-        property bool primed: false
+        // The clip on screen, and where to go once a newly set source has
+        // loaded (pendingMs is -1 when nothing is waiting).
+        property int clip: -1
+        property int pendingMs: -1
+        property bool pendingPlay: false
+        // Switching sources first reports the old video as loaded again; only
+        // a load that follows the new one starting counts.
+        property bool loadStarted: false
+        // A freshly loaded source shows black until played; playing it muted
+        // until the first frame arrives, then pausing, puts that frame up.
         property bool priming: false
+        property int primeMs: 0
 
-        function startPriming() {
-            if (primed || priming || backend.source.toString() === "")
+        // Shows sourceTime in clip index, and plays on from there if asked.
+        function show(index, sourceTime, andPlay) {
+            var url = backend.videos[timeline.clips[index].source].url;
+            var ms = Math.round(sourceTime * 1000);
+            clip = index;
+            // Compared as text: url values are never identical as objects.
+            if (source.toString() !== url.toString() || mediaStatus === MediaPlayer.LoadingMedia) {
+                pendingMs = ms;
+                pendingPlay = andPlay;
+                loadStarted = mediaStatus === MediaPlayer.LoadingMedia && source.toString() === url.toString();
+                source = url;
                 return;
+            }
+            pendingMs = -1;
+            finishPriming();
+            position = ms;
+            if (andPlay)
+                play();
+        }
+
+        function startPriming(ms) {
             win.ensureAudioOutput();
-            primed = true;
             priming = true;
-            position = 0;
+            primeMs = ms;
+            position = ms;
             play();
             primeFallback.restart();
         }
@@ -329,37 +389,86 @@ ApplicationWindow {
                 return;
             primeFallback.stop();
             pause();
-            position = 0;
+            position = primeMs;
             priming = false;
         }
 
         onMediaStatusChanged: {
-            if (mediaStatus === MediaPlayer.LoadedMedia || mediaStatus === MediaPlayer.BufferedMedia)
-                startPriming();
+            // A video that won't load leaves nothing to wait for.
+            if (mediaStatus === MediaPlayer.InvalidMedia)
+                pendingMs = -1;
+            if (mediaStatus === MediaPlayer.LoadingMedia)
+                loadStarted = true;
+            // Seeking or playing from inside this handler makes the player
+            // load the video over again, so it waits for the handler to return.
+            if (pendingMs >= 0 && loadStarted
+                    && (mediaStatus === MediaPlayer.LoadedMedia || mediaStatus === MediaPlayer.BufferedMedia))
+                Qt.callLater(takePending);
+        }
+        function takePending() {
+            if (pendingMs < 0)
+                return;
+            var ms = pendingMs;
+            pendingMs = -1;
+            if (pendingPlay) {
+                position = ms;
+                play();
+            } else {
+                startPriming(ms);
+            }
         }
         onPositionChanged: {
-            if (priming && position > 0) {
-                finishPriming();
+            if (priming) {
+                if (player.position > primeMs)
+                    finishPriming();
                 return;
             }
-            // Play only the clips: hop over gaps and stop after the last clip.
-            if (playbackState === MediaPlayer.PlayingState) {
-                var t = position / 1000, next = timeline.playableFrom(t);
-                // Past the last clip: stop where we are. Seeking to its end
-                // could land past the final frame.
-                if (next < 0) {
+            if (pendingMs >= 0 || clip < 0 || clip >= timeline.clips.length)
+                return;
+            var c = timeline.clips[clip], t = player.position / 1000;
+            // Play the clips in order: carry on into a clip that continues
+            // this one, jump to any other, and stop after the last.
+            if (playbackState === MediaPlayer.PlayingState && t >= c.out - 0.03) {
+                if (clip + 1 >= timeline.clips.length) {
                     pause();
-                    editBar.playheadSec = timeline.edgeFrom(backend.duration, 1);
+                    editBar.playheadSec = timeline.duration;
                     return;
                 }
-                if (next - t > 0.05) {
-                    position = Math.round(next * 1000);
+                var next = timeline.clips[clip + 1];
+                if (next.source !== c.source || Math.abs(next.in - c.out) > 0.05) {
+                    show(clip + 1, next.in, true);
                     return;
                 }
+                clip += 1;
+                c = next;
             }
             if (!editBar.interacting)
-                editBar.playheadSec = position / 1000;
+                editBar.playheadSec = c.start + Math.max(0, Math.min(t, c.out) - c.in);
         }
+    }
+
+    // After an edit, the clip under the playhead may be another one now, or
+    // gone, so put the playhead's frame back up.
+    Connections {
+        target: win.timeline
+        function onChanged() {
+            Qt.callLater(win.resync);
+        }
+    }
+    function resync() {
+        if (!hasVideo || timeline.duration <= 0 || editBar.interacting || player.pendingMs >= 0)
+            return;
+        var t = Math.min(editBar.playheadSec, timeline.duration);
+        var i = timeline.clipAt(t), clip = timeline.clips[i];
+        var sourceTime = clip.in + t - clip.start;
+        // Still playing the right stretch, e.g. after a split: no need to seek.
+        if (playing() && backend.videos[clip.source].url.toString() === player.source.toString()
+                && Math.abs(sourceTime - player.position / 1000) < 0.1) {
+            player.clip = i;
+            return;
+        }
+        editBar.playheadSec = t;
+        player.show(i, sourceTime, playing());
     }
 
     Component {
@@ -460,6 +569,13 @@ ApplicationWindow {
                     ctx.lineTo(19, 12);
                     ctx.closePath();
                     ctx.fill();
+                } else if (iconButton.iconName === "plus") {
+                    ctx.beginPath();
+                    ctx.moveTo(12, 5);
+                    ctx.lineTo(12, 19);
+                    ctx.moveTo(5, 12);
+                    ctx.lineTo(19, 12);
+                    ctx.stroke();
                 } else if (iconButton.iconName === "download") {
                     ctx.beginPath();
                     ctx.moveTo(12, 4);
@@ -558,7 +674,7 @@ ApplicationWindow {
                 Layout.preferredHeight: 44
                 iconName: player.playbackState === MediaPlayer.PlayingState && !player.priming ? "pause" : "play"
                 tipText: player.playbackState === MediaPlayer.PlayingState ? "Pause" : "Play"
-                enabled: backend.duration > 0
+                enabled: timeline.duration > 0
                 onClicked: togglePlay()
             }
 
@@ -572,6 +688,19 @@ ApplicationWindow {
                     player.pause();
                     seekTo(seconds);
                 }
+                onScrubClip: (index, sourceTime) => {
+                    player.pause();
+                    player.show(index, sourceTime, false);
+                }
+            }
+
+            IconButton {
+                Layout.preferredWidth: 44
+                Layout.preferredHeight: 44
+                iconName: "plus"
+                tipText: "Add a video"
+                enabled: timeline.duration > 0
+                onClicked: addVideo()
             }
 
             IconButton {
@@ -579,7 +708,7 @@ ApplicationWindow {
                 Layout.preferredHeight: 44
                 iconName: "download"
                 tipText: "Export"
-                enabled: backend.duration > 0 && !backend.busy
+                enabled: timeline.duration > 0 && !backend.busy
                 onClicked: exportVideo()
             }
         }
@@ -605,9 +734,9 @@ ApplicationWindow {
 
             Label {
                 anchors.centerIn: parent
-                visible: win.statusText === "" && backend.duration > 0 && !editBar.trimming
+                visible: win.statusText === "" && timeline.duration > 0 && !editBar.trimming
                 textFormat: Text.StyledText
-                text: Format.fmt(editBar.playheadSec) + " (" + Format.fmt(win.timeline.keptDuration) + ")"
+                text: Format.fmt(editBar.playheadSec) + " (" + Format.fmt(win.timeline.duration) + ")"
                     + (editBar.zoomed ? " · <font color=\"" + win.accent + "\">zoomed</font>" : "")
                 color: "#d6d6da"
                 font.pixelSize: 13
@@ -681,12 +810,14 @@ ApplicationWindow {
                         { keys: "Alt ← / →", action: "Move playhead 0.2s" },
                         { keys: "[ / ]", action: "Previous / next clip edge" },
                         { keys: "S", action: "Split the clip at the playhead" },
-                        { keys: "X", action: "Remove the clip, or restore the gap" },
+                        { keys: "X", action: "Remove the clip" },
+                        { keys: "Alt [ / ]", action: "Move the clip earlier / later" },
                         { keys: "Ctrl Space", action: "Clip start to playhead" },
                         { keys: "Alt Space", action: "Clip end to playhead" },
                         { keys: "Ctrl Z", action: "Undo (Ctrl Shift Z redo)" },
                         { keys: "Z", action: "Zoom to the clip" },
                         { keys: "Ctrl O", action: "Open a video" },
+                        { keys: "Ctrl Shift O", action: "Add a video after this clip" },
                         { keys: "Ctrl S", action: "Export" },
                         { keys: "Q", action: "Quit" },
                         { keys: "?", action: "Show these shortcuts" }
@@ -802,13 +933,14 @@ ApplicationWindow {
         function onInfoChanged() {
             win.noticeText = "";
             noticeTimer.stop();
-            // Reset priming too, or a video opened mid-prime would stay black:
-            // startPriming() bails while priming is still true.
+            // Drop any prime or load still pending for the last video.
             primeFallback.stop();
             player.priming = false;
-            player.primed = false;
+            player.pendingMs = -1;
             editBar.zoomed = false;
             editBar.playheadSec = 0;
+            if (win.hasVideo)
+                player.show(0, 0, false);
         }
         function onExportDone(path) {
             win.showNotice("Saved " + path);

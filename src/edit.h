@@ -2,32 +2,29 @@
 
 #include <QList>
 
-// What survives of a video: an ordered list of clips from the source, which is
-// never modified. Neighbouring clips may touch (a split with nothing removed);
-// the gaps between them are what gets cut. Times are seconds in the source.
+// What gets exported: an ordered list of clips, each a stretch of one of the
+// loaded videos, played back to back. The videos are never modified; a clip's
+// in and out are seconds in its source.
 namespace edit {
 
-struct Range {
-    double start = 0.0;
-    double end = 0.0;
-    double length() const { return end - start; }
-    bool operator==(const Range &other) const {
-        return start == other.start && end == other.end;
+struct Clip {
+    int source = 0;
+    double in = 0.0;
+    double out = 0.0;
+    double length() const { return out - in; }
+    bool operator==(const Clip &other) const {
+        return source == other.source && in == other.in && out == other.out;
     }
 };
-using Clips = QList<Range>;
+using Clips = QList<Clip>;
 
 constexpr double minimumClip = 0.1;
-// Gaps narrower than this close up, so a handle dropped by a neighbour joins it.
-constexpr double minimumGap = 0.05;
 
-Clips whole(double duration);
-// Clamps into the video, sorts, resolves overlaps, closes hairline gaps, and
-// drops clips too short to keep.
-Clips normalized(Clips clips, double duration);
-// The clips with touching neighbours merged: what an export encodes.
-QList<Range> kept(const Clips &clips);
-double keptDuration(const Clips &clips);
-bool untouched(const Clips &clips, double duration);
+double duration(const Clips &clips);
+// Neighbours that carry on where the one before left off in the same source,
+// merged: what an export encodes.
+Clips merged(const Clips &clips);
+// Nothing cut, added or reordered: all of the first source, as it is.
+bool untouched(const Clips &clips, double firstSourceDuration);
 
 }  // namespace edit

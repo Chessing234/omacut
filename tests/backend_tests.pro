@@ -13,7 +13,6 @@ HEADERS += \
     ../src/portalfilepicker.h \
     ../src/thumbprovider.h \
     ../src/timeline.h \
-    ../src/thumbworker.h
 
 SOURCES += \
     backend_tests.cpp \
@@ -23,4 +22,3 @@ SOURCES += \
     ../src/portalfilepicker.cpp \
     ../src/thumbprovider.cpp \
     ../src/timeline.cpp \
-    ../src/thumbworker.cpp

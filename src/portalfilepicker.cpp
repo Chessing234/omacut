@@ -179,8 +179,7 @@ void PortalFilePicker::openVideo() {
     requestFile(QStringLiteral("OpenFile"), QStringLiteral("Open Video File"), options, Action::Open);
 }
 
-void PortalFilePicker::exportVideo(const QUrl &suggestedUrl, double start, double end,
-                                   const QList<int> &scaleHeights) {
+void PortalFilePicker::exportVideo(const QUrl &suggestedUrl, const QList<int> &scaleHeights) {
     const QFileInfo target(suggestedUrl.toLocalFile());
 
     QVariantMap options;
@@ -204,11 +203,8 @@ void PortalFilePicker::exportVideo(const QUrl &suggestedUrl, double start, doubl
                                                           QStringLiteral("original")}}));
     }
 
-    if (requestFile(QStringLiteral("SaveFile"), QStringLiteral("Save Video File"),
-                    options, Action::Export)) {
-        m_pendingExportStart = start;
-        m_pendingExportEnd = end;
-    }
+    requestFile(QStringLiteral("SaveFile"), QStringLiteral("Save Video File"),
+                options, Action::Export);
 }
 
 bool PortalFilePicker::connectToRequestPath(const QString &path) {
@@ -219,10 +215,10 @@ bool PortalFilePicker::connectToRequestPath(const QString &path) {
         this, SLOT(handleResponse(uint,QVariantMap)));
 }
 
-bool PortalFilePicker::requestFile(const QString &method, const QString &title,
+void PortalFilePicker::requestFile(const QString &method, const QString &title,
                                    QVariantMap options, Action action) {
     if (m_pendingAction != Action::None)
-        return false;
+        return;
 
     QDBusConnection bus = QDBusConnection::sessionBus();
     QDBusInterface portal(QStringLiteral("org.freedesktop.portal.Desktop"),
@@ -231,7 +227,7 @@ bool PortalFilePicker::requestFile(const QString &method, const QString &title,
                           bus);
     if (!portal.isValid()) {
         emit failed(QStringLiteral("The XDG desktop portal file chooser is not available."));
-        return false;
+        return;
     }
 
     // Subscribe to the Response signal at the request path the portal will
@@ -248,7 +244,7 @@ bool PortalFilePicker::requestFile(const QString &method, const QString &title,
     if (!connectToRequestPath(predictedPath)) {
         clearPending();
         emit failed(QStringLiteral("Could not listen for the portal file picker response."));
-        return false;
+        return;
     }
 
     auto *watcher = new QDBusPendingCallWatcher(
@@ -283,13 +279,10 @@ bool PortalFilePicker::requestFile(const QString &method, const QString &title,
             }
         }
     });
-    return true;
 }
 
 void PortalFilePicker::handleResponse(uint response, const QVariantMap &results) {
     const Action action = m_pendingAction;
-    const double start = m_pendingExportStart;
-    const double end = m_pendingExportEnd;
     clearPending();
 
     if (response != 0)
@@ -325,7 +318,7 @@ void PortalFilePicker::handleResponse(uint response, const QVariantMap &results)
         }
         arg.endArray();
     }
-    emit exportSelected(url, start, end, scaleHeight);
+    emit exportSelected(url, scaleHeight);
 }
 
 void PortalFilePicker::clearPending() {

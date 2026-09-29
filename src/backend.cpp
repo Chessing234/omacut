@@ -76,7 +76,9 @@ Backend::~Backend() {
 
 void Backend::wireFilePicker() {
     connect(m_filePicker, &FilePicker::openSelected, this, &Backend::load);
-    connect(m_filePicker, &FilePicker::exportSelected, this, &Backend::exportClip);
+    connect(m_filePicker, &FilePicker::exportSelected, this, [this](const QUrl &url, int scaleHeight) {
+        exportClips(url, m_exportDialogClips, scaleHeight);
+    });
     connect(m_filePicker, &FilePicker::failed, this, &Backend::loadError);
 }
 
@@ -167,6 +169,7 @@ bool Backend::load(const QUrl &url) {
     m_info = info;
     m_path = path;
     m_source = url;
+    m_timeline.reset(m_info.duration);
 
     // New video: drop the old filmstrip and bump the revision so QML reloads.
     stopThumbs();
@@ -193,12 +196,12 @@ void Backend::openVideoDialog() {
     m_filePicker->openVideo();
 }
 
-void Backend::exportDialog(double start, double end) {
+void Backend::exportDialog() {
     if (m_path.isEmpty() || !m_info.ok)
         return;
 
-    m_filePicker->exportVideo(suggestedExportUrl(), start, end,
-                              exportHeights(m_info.width, m_info.height));
+    m_exportDialogClips = m_timeline.clips();
+    m_filePicker->exportVideo(suggestedExportUrl(), exportHeights(m_info.width, m_info.height));
 }
 
 QList<int> Backend::exportHeights(int width, int height) {
@@ -314,11 +317,13 @@ QUrl Backend::suggestedExportUrl() const {
     return QUrl::fromLocalFile(target);
 }
 
-void Backend::exportClip(const QUrl &dst, double start, double end, int scaleHeight) {
+void Backend::exportClips(const QUrl &dst, const edit::Clips &clips, int scaleHeight) {
     if (m_path.isEmpty() || !m_info.ok || m_busy)
         return;
 
-    if (end - start <= 0.0) {
+    const QList<edit::Range> ranges = edit::kept(clips);
+    const double clipLen = edit::keptDuration(clips);
+    if (clipLen <= 0.0) {
         emit exportFailed("The selected clip has no length.");
         return;
     }
@@ -347,14 +352,13 @@ void Backend::exportClip(const QUrl &dst, double start, double end, int scaleHei
     // success, so failed/cancelled exports preserve any existing file.
     const QString tmpPath = outPath + QStringLiteral(".omacut-part.mp4");
     QFile::remove(tmpPath);
-    const QStringList args = ffmpeg::trimArgs(m_path, tmpPath, start, end, scaleHeight);
+    const QStringList args = ffmpeg::trimArgs(m_path, tmpPath, ranges, m_info.audio, scaleHeight);
 
     auto *proc = new QProcess(this);
     auto completed = std::make_shared<bool>(false);
 
     // ffmpeg -progress writes key=value blocks to stdout as it encodes;
-    // out_time_us against the clip length gives the percentage.
-    const double clipLen = end - start;
+    // out_time_us against the kept length gives the percentage.
     auto progressBuf = std::make_shared<QByteArray>();
     connect(proc, &QProcess::readyReadStandardOutput, this,
             [this, proc, progressBuf, clipLen, completed] {
@@ -375,7 +379,7 @@ void Backend::exportClip(const QUrl &dst, double start, double end, int scaleHei
             });
 
     connect(proc, &QProcess::finished, this,
-            [this, proc, outPath, tmpPath, completed](int code, QProcess::ExitStatus exitStatus) {
+            [this, proc, outPath, tmpPath, completed, clips](int code, QProcess::ExitStatus exitStatus) {
                 if (*completed)
                     return;
                 *completed = true;
@@ -391,6 +395,7 @@ void Backend::exportClip(const QUrl &dst, double start, double end, int scaleHei
                 }
                 setBusy(false);
                 setStatus(QString());
+                m_timeline.markExported(clips);
                 emit exportDone(outPath);
             });
     connect(proc, &QProcess::errorOccurred, this,

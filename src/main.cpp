@@ -11,6 +11,13 @@
 #include "thumbprovider.h"
 
 int main(int argc, char *argv[]) {
+    // Qt's ffmpeg backend falls through to Vulkan video when VA-API is missing,
+    // and on GPUs without Vulkan decode queues it then picks ffmpeg's hwaccel-only
+    // av1 decoder and never falls back to dav1d, leaving the preview black. Stick
+    // to the backends Qt checks codec support for, so software decode kicks in.
+    if (!qEnvironmentVariableIsSet("QT_FFMPEG_DECODING_HW_DEVICE_TYPES"))
+        qputenv("QT_FFMPEG_DECODING_HW_DEVICE_TYPES", "vaapi,cuda");
+
     QGuiApplication app(argc, argv);
     app.setApplicationName("omacut");
 

@@ -1,6 +1,6 @@
 .pragma library
 
-// [hh:]mm:ss.cc, shared by Main.qml and TrimBar.qml. Rounds to centiseconds first so
+// [hh:]mm:ss.cc, shared by Main.qml and EditBar.qml. Rounds to centiseconds first so
 // boundary values render correctly (e.g. 59.999 -> "01:00.00", not "00:60.00").
 function fmt(sec) {
     if (sec < 0 || isNaN(sec))

@@ -37,7 +37,10 @@ double probePacketDuration(const QString &ffprobe, const QString &path, int stre
     if (proc.exitStatus() != QProcess::NormalExit || proc.exitCode() != 0)
         return 0.0;
 
-    double duration = 0.0;
+    // From the first timestamp, which a cut or a capture can start well past 0.
+    // A single packet is a still image, not a video.
+    double first = 0.0, end = 0.0;
+    int packets = 0;
     for (const QByteArray &raw : proc.readAllStandardOutput().split('\n')) {
         const QByteArray line = raw.trimmed();
         if (line.isEmpty())
@@ -49,9 +52,11 @@ double probePacketDuration(const QString &ffprobe, const QString &path, int stre
             continue;
         bool durOk = false;
         const double pktDur = fields.value(1).toDouble(&durOk);
-        duration = qMax(duration, pts + (durOk && pktDur > 0.0 ? pktDur : 0.0));
+        first = packets == 0 ? pts : qMin(first, pts);
+        end = qMax(end, pts + (durOk && pktDur > 0.0 ? pktDur : 0.0));
+        ++packets;
     }
-    return duration;
+    return packets > 1 ? end - first : 0.0;
 }
 }
 

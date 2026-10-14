@@ -435,6 +435,28 @@ void BackendTests::probeReadsStreamedWebmAndSkipsCoverArt() {
     QVERIFY2(webmInfo.ok, qPrintable(webmInfo.error));
     QVERIFY2(qAbs(webmInfo.duration - 1.5) < 0.15, qPrintable(QString::number(webmInfo.duration)));
 
+    // Timestamps that start an hour in still make a 1.5s video.
+    const QString late = m_dir.filePath(QStringLiteral("streamed-late.webm"));
+    {
+        QProcess proc;
+        proc.setStandardOutputFile(late);
+        proc.start(ffmpegBin, {
+            QStringLiteral("-loglevel"), QStringLiteral("error"),
+            QStringLiteral("-f"), QStringLiteral("lavfi"),
+            QStringLiteral("-i"), QStringLiteral("testsrc=size=32x32:rate=10:duration=1.5"),
+            QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
+            QStringLiteral("-c:v"), QStringLiteral("libvpx-vp9"),
+            QStringLiteral("-output_ts_offset"), QStringLiteral("3600"),
+            QStringLiteral("-f"), QStringLiteral("webm"),
+            QStringLiteral("pipe:1"),
+        });
+        QVERIFY(proc.waitForFinished(10000));
+        QCOMPARE(proc.exitCode(), 0);
+    }
+    const ffmpeg::VideoInfo lateInfo = ffmpeg::probe(late);
+    QVERIFY2(lateInfo.ok, qPrintable(lateInfo.error));
+    QVERIFY2(qAbs(lateInfo.duration - 1.5) < 0.15, qPrintable(QString::number(lateInfo.duration)));
+
     // Cover art is listed as a video stream, but an audio file with art has
     // no video to edit.
     const QString cover = m_dir.filePath(QStringLiteral("cover.png"));
@@ -468,6 +490,8 @@ void BackendTests::probeReadsStreamedWebmAndSkipsCoverArt() {
     }
     const ffmpeg::VideoInfo songInfo = ffmpeg::probe(song);
     QVERIFY(!songInfo.ok);
+    // Nor is a still image a video, though it has a frame and no duration.
+    QVERIFY(!ffmpeg::probe(cover).ok);
 }
 
 void BackendTests::thumbProviderServesAndCachesFrames() {

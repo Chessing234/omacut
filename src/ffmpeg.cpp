@@ -36,7 +36,6 @@ VideoInfo probe(const QString &path) {
         "-print_format", "json",
         "-show_format",
         "-show_streams",
-        "-select_streams", "v:0",
         path,
     });
     if (!proc.waitForFinished(kProbeTimeoutMs)) {
@@ -55,16 +54,35 @@ VideoInfo probe(const QString &path) {
 
     const QJsonDocument doc = QJsonDocument::fromJson(proc.readAllStandardOutput());
     const QJsonObject root = doc.object();
-    const QJsonArray streams = root.value("streams").toArray();
-    if (streams.isEmpty()) {
+    QJsonObject stream;
+    for (const QJsonValue &value : root.value("streams").toArray()) {
+        const QJsonObject candidate = value.toObject();
+        const QString type = candidate.value("codec_type").toString();
+        if (type == "video" && stream.isEmpty())
+            stream = candidate;
+        else if (type == "audio")
+            info.audio = true;
+    }
+    if (stream.isEmpty()) {
         info.error = "No video stream found in this file.";
         return info;
     }
 
-    const QJsonObject stream = streams.first().toObject();
-
     info.width = stream.value("width").toInt();
     info.height = stream.value("height").toInt();
+    // Phones record sideways and say how to turn it upright, in a display
+    // matrix or the older rotate tag.
+    int rotation = stream.value("tags").toObject().value("rotate").toString().toInt();
+    for (const QJsonValue &sideData : stream.value("side_data_list").toArray()) {
+        if (sideData.toObject().contains("rotation"))
+            rotation = sideData.toObject().value("rotation").toInt();
+    }
+    // Sized as displayed: widened for non-square pixels, like PAL's 16:15.
+    const QStringList sar = stream.value("sample_aspect_ratio").toString().split(':');
+    if (sar.size() == 2 && sar[0].toInt() > 0 && sar[1].toInt() > 0)
+        info.width = qRound(double(info.width) * sar[0].toInt() / sar[1].toInt());
+    if (qAbs(rotation) % 180 == 90)
+        std::swap(info.width, info.height);
 
     // Duration can live on the stream or on the container.
     QString durationStr = stream.value("duration").toString();
@@ -123,25 +141,60 @@ QImage thumbnail(const QString &path, double time, int height,
     return img;
 }
 
-QStringList trimArgs(const QString &src, const QString &dst, double start, double end,
-                     int scaleHeight) {
+QStringList trimArgs(const QList<Segment> &segments, const QString &dst,
+                     int width, int height, int scaleHeight) {
+    bool audio = false;
+    bool mixed = false;
+    for (const Segment &segment : segments) {
+        audio = audio || segment.audio;
+        mixed = mixed || segment.path != segments.first().path;
+    }
+
     // Machine-readable progress on stdout (errors stay on stderr), so the UI
     // can show how far along the encode is.
     QStringList args = {"-y", "-loglevel", "error", "-progress", "pipe:1"};
-    // -ss before -i seeks fast; -t gives the output duration. +faststart puts
-    // the moov atom up front so shared clips start playing before they finish
-    // downloading.
-    args << "-ss" << QString::number(start, 'f', 3)
-         << "-i" << src
-         << "-t" << QString::number(qMax(end - start, 0.0), 'f', 3);
+    // One input per segment: -ss before -i seeks fast and -t bounds it, so
+    // only what survives the cut is decoded. The concat filter joins them.
+    QString graph;
+    QString inputs;
+    for (int i = 0; i < segments.size(); ++i) {
+        const Segment &segment = segments[i];
+        const QString length = QString::number(qMax(segment.end - segment.start, 0.0), 'f', 3);
+        args << "-ss" << QString::number(segment.start, 'f', 3) << "-t" << length
+             << "-i" << segment.path;
+        if (!mixed) {
+            inputs += QString("[%1:v:0]").arg(i) + (audio ? QString("[%1:a:0]").arg(i) : QString());
+            continue;
+        }
+        // Concat needs one frame size and one audio format throughout. Pixels
+        // are squared first, so non-square video keeps its shape; -1 centres
+        // the padding; libx264 needs even sides.
+        graph += QString("[%1:v:0]scale='trunc(iw*sar/2)*2':ih,setsar=1,"
+                         "scale=%2:%3:force_original_aspect_ratio=decrease,"
+                         "pad=%2:%3:-1:-1,setsar=1,format=yuv420p[v%1];")
+                     .arg(i).arg(width / 2 * 2).arg(height / 2 * 2);
+        if (segment.audio)
+            graph += QString("[%1:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a%1];").arg(i);
+        else if (audio)
+            graph += QString("anullsrc=r=48000:cl=stereo,atrim=duration=%2,aformat=sample_fmts=fltp[a%1];")
+                         .arg(i).arg(length);
+        inputs += QString("[v%1]").arg(i) + (audio ? QString("[a%1]").arg(i) : QString());
+    }
+    graph += inputs + QString("concat=n=%1:v=1:a=%2").arg(segments.size()).arg(audio ? 1 : 0);
     // Cap the shorter side, judged on the decoded (rotation-applied) frame, so
     // portrait and landscape both keep their aspect ratio. -2 keeps the other
     // side divisible by two, which libx264 requires.
     if (scaleHeight > 0)
-        args << "-vf"
-             << QString("scale='if(gt(iw,ih),-2,%1)':'if(gt(iw,ih),%1,-2)'").arg(scaleHeight);
-    args << "-c:v" << "libx264" << "-preset" << "veryfast"
-         << "-crf" << "18" << "-c:a" << "aac"
+        graph += QString("[joined]%1;[joined]scale='if(gt(iw,ih),-2,%2)':'if(gt(iw,ih),%2,-2)'[v]")
+                     .arg(audio ? "[a]" : "").arg(scaleHeight);
+    else
+        graph += QString("[v]") + (audio ? "[a]" : "");
+    args << "-filter_complex" << graph << "-map" << "[v]";
+    if (audio)
+        args << "-map" << "[a]" << "-c:a" << "aac";
+    // +faststart puts the moov atom up front so shared clips start playing
+    // before they finish downloading.
+    args << "-c:v" << "libx264" << "-preset" << "veryfast" << "-crf" << "18"
          << "-movflags" << "+faststart"
          << dst;
     return args;

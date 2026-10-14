@@ -30,9 +30,15 @@ VideoInfo probe(const QString &path);
 QImage thumbnail(const QString &path, double time, int height = 90,
                  const std::atomic<bool> *cancel = nullptr);
 
-// ffmpeg arguments that write the frame at `time` seconds to `pngPath`, full
-// size, upright and with square pixels. Refuses to overwrite.
-QStringList frameArgs(const QString &path, double time, const QString &pngPath);
+// ffprobe arguments listing the video packet times up to `time` seconds,
+// from far enough back to find the frame on screen there.
+QStringList shownFrameArgs(const QString &path, double time);
+// The frame on screen at `time`: the last listed packet time not after it.
+// `time` itself when none is listed.
+double shownFrameTime(const QByteArray &packetTimes, double time);
+// ffmpeg arguments that write the frame starting at `frameTime` seconds to
+// `pngPath`, full size, upright and with square pixels.
+QStringList frameArgs(const QString &path, double frameTime, const QString &pngPath);
 
 // A stretch [start, end] seconds of one video, as exported.
 struct Segment {

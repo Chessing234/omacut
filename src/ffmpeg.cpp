@@ -141,14 +141,40 @@ QImage thumbnail(const QString &path, double time, int height,
     return img;
 }
 
-QStringList frameArgs(const QString &path, double time, const QString &pngPath) {
+QStringList shownFrameArgs(const QString &path, double time) {
+    // Packets only, nothing decoded, so reaching back 30s is cheap. That
+    // covers a recording's still last frame, held long past its start.
+    return {
+        "-v", "error",
+        "-select_streams", "V:0",
+        "-read_intervals", QString("%1%%2").arg(qMax(time - 30.0, 0.0), 0, 'f', 3)
+                               .arg(time + 0.001, 0, 'f', 3),
+        "-show_entries", "packet=pts_time",
+        "-of", "csv=p=0",
+        path,
+    };
+}
+
+double shownFrameTime(const QByteArray &packetTimes, double time) {
+    double shown = -1.0;
+    for (const QByteArray &line : packetTimes.split('\n')) {
+        bool ok = false;
+        const double pts = line.trimmed().toDouble(&ok);
+        if (ok && pts <= time + 0.0005)
+            shown = qMax(shown, pts);
+    }
+    return shown >= 0.0 ? shown : time;
+}
+
+QStringList frameArgs(const QString &path, double frameTime, const QString &pngPath) {
+    // A hair before the frame's start, which ffprobe printed rounded.
     return {
         "-loglevel", "error",
-        "-n",
-        "-ss", QString::number(qMax(time, 0.0), 'f', 3),
+        "-y",
+        "-ss", QString::number(qMax(frameTime - 0.0005, 0.0), 'f', 6),
         "-i", path,
         "-frames:v", "1",
-        "-vf", "scale=trunc(iw*sar):ih,setsar=1",
+        "-vf", "scale=round(iw*sar):ih,setsar=1",
         pngPath,
     };
 }

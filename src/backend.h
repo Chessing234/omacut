@@ -6,6 +6,8 @@
 #include <QUrl>
 #include <QVariantList>
 
+#include <functional>
+
 #include "ffmpeg.h"
 #include "timeline.h"
 
@@ -100,6 +102,11 @@ private:
     };
     // Probes the video and registers its frames with the thumbnail provider.
     bool probeVideo(const QUrl &url, Video *video);
+    // One step of saving a frame: runs program, then done with its output.
+    // A failure ends the save, removing partPath if given.
+    void runFrameStep(const QString &program, const QStringList &args,
+                      std::function<void(const QByteArray &)> done,
+                      const QString &partPath = QString());
     // Whether path is the file behind one of the loaded videos.
     bool isVideoPath(const QString &path) const;
 

@@ -98,6 +98,7 @@ public:
         exportedClips = timeline.clips();
     }
     Q_INVOKABLE QUrl suggestedExportUrl() const { return {}; }
+    Q_INVOKABLE void saveFrame(double) {}
 
     void announceInfo() {
         timeline.reset(m_duration);
@@ -129,6 +130,8 @@ signals:
     void themeAccentChanged();
     void exportDone(const QString &path);
     void exportFailed(const QString &message);
+    void frameSaved(const QString &path);
+    void frameFailed(const QString &message);
     void loadError(const QString &message);
 
 private:
@@ -201,6 +204,7 @@ private slots:
     void exportClipWritesMp4();
     void saveFrameWritesPngBesideTheSource();
     void saveFrameSquaresStretchedPixels();
+    void shownFrameIsTheLastToStartByThen();
     void exportKeepsOnlyTheClipsFromTheDialog();
     void exportJoinsDifferentVideos();
     void exportSkipsClipsWhoseVideoIsGone();
@@ -519,6 +523,24 @@ void BackendTests::saveFrameWritesPngBesideTheSource() {
     QCOMPARE(savedSpy.count(), 2);
     QVERIFY(savedSpy.at(1).at(0).toString().endsWith(QStringLiteral("clip-frame-2.png")));
     QVERIFY(!QFileInfo::exists(m_dir.filePath(QStringLiteral("clip-frame-3.png"))));
+
+    // At the very end, past the last frame's start, it's still the frame on screen.
+    backend.saveFrame(1.0);
+    QTRY_VERIFY_WITH_TIMEOUT(savedSpy.count() + failedSpy.count() > 2, 10000);
+    QVERIFY2(failedSpy.isEmpty(), qPrintable(failedSpy.value(0).value(0).toString()));
+    QVERIFY(savedSpy.at(2).at(0).toString().endsWith(QStringLiteral("clip-frame-3.png")));
+
+    // Nothing is left half-written under a hidden name.
+    QVERIFY(QDir(m_dir.path()).entryList({QStringLiteral(".omacut-frame-*")},
+                                          QDir::Files | QDir::Hidden).isEmpty());
+}
+
+void BackendTests::shownFrameIsTheLastToStartByThen() {
+    const QByteArray times = "0.000000\n0.033367\n0.066733\n\n";
+    QCOMPARE(ffmpeg::shownFrameTime(times, 0.05), 0.033367);
+    QCOMPARE(ffmpeg::shownFrameTime(times, 0.0667), 0.066733);  // printed rounded
+    QCOMPARE(ffmpeg::shownFrameTime(times, 5.0), 0.066733);     // a held last frame
+    QCOMPARE(ffmpeg::shownFrameTime(QByteArray(), 2.5), 2.5);
 }
 
 void BackendTests::saveFrameSquaresStretchedPixels() {

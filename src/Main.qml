@@ -55,6 +55,25 @@ ApplicationWindow {
         player.pause();
         backend.addVideoDialog(editBar.playheadSec);
     }
+    // Dropped videos open into an empty window, and otherwise join the edit
+    // after the clip under the playhead, in the order dropped, the way the +
+    // button adds one. Adding is undoable, so a stray drop costs nothing.
+    // A file that won't open is skipped and the rest go on; when some made
+    // it, one notice counts the skipped, since each error replaces the last.
+    function dropVideos(urls) {
+        var t = editBar.playheadSec, added = 0;
+        for (var i = 0; i < urls.length; ++i) {
+            var at = win.hasVideo ? timeline.clipAt(t) + 1 : 0;
+            if (!backend.addVideo(urls[i], t))
+                continue;
+            ++added;
+            t = timeline.clipStart(at);
+        }
+        var skipped = urls.length - added;
+        if (added > 0 && skipped > 0)
+            showNotice(skipped === 1 ? "Skipped a file that won't open." : "Skipped " + skipped + " files that won't open.");
+        return added > 0;
+    }
     function exportVideo() {
         if (!win.hasVideo || timeline.duration <= 0 || backend.busy)
             return;
@@ -803,6 +822,42 @@ ApplicationWindow {
                 color: "#d6d6da"
                 font.pixelSize: 13
                 font.family: "monospace"
+            }
+        }
+    }
+
+    DropArea {
+        id: videoDropArea
+        objectName: "videoDropArea"
+        anchors.fill: parent
+        z: 5
+        enabled: !win.quitConfirmVisible && !win.helpVisible && !backend.busy
+        // Only local files: "file:-report" or "file:http://..." would reach
+        // ffprobe as an option or an address, and "file:////host/..." is a
+        // network share.
+        onEntered: (drag) => {
+            drag.accepted = drag.hasUrls && drag.urls.length > 0
+                && drag.urls.every((url) => /^file:\/\/\/(?!\/)/.test(url.toString()));
+        }
+        onDropped: (drop) => {
+            player.pause();
+            player.pendingPlay = false;
+            if (win.dropVideos(drop.urls))
+                drop.accept(Qt.CopyAction);
+        }
+        Rectangle {
+            anchors.fill: parent
+            anchors.margins: 8
+            visible: videoDropArea.containsDrag
+            color: "#cc0e0e10"
+            border.color: win.accent
+            border.width: 2
+            radius: 12
+            Label {
+                anchors.centerIn: parent
+                text: win.hasVideo ? "Drop to add to the edit" : "Drop a video to open it"
+                font.pixelSize: 20
+                color: win.accent
             }
         }
     }

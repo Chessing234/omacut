@@ -1,6 +1,10 @@
 #include <QtTest>
 
 #include <QDir>
+#include <QDragEnterEvent>
+#include <QDragLeaveEvent>
+#include <QDropEvent>
+#include <QMimeData>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
@@ -160,7 +164,7 @@ static QString mainQmlPath() {
 // as the window is in use, so each shortcut test is just the key presses.
 class QmlHarness {
 public:
-    explicit QmlHarness(ShortcutBackend &backend) {
+    explicit QmlHarness(QObject &backend) {
         m_engine.addImageProvider(QStringLiteral("thumbs"), new ThumbProvider);
         m_engine.rootContext()->setContextProperty(QStringLiteral("backend"), &backend);
         m_engine.load(QUrl::fromLocalFile(mainQmlPath()));
@@ -213,6 +217,9 @@ private slots:
     void qmlBracketsJumpBetweenClipEdges();
     void qmlKeysMoveAndAddClips();
     void qmlZoomFocusesTheClip();
+    void qmlDropOpensThenAddsVideos();
+    void qmlDropTakesOnlyLocalFiles();
+    void qmlDropLandsAfterThePlayheadsClip();
     void qmlQuitConfirmsUnexportedEdit();
     void timelineSplitsTrimsAndJoins();
     void timelineUndoesAGestureAsOneStep();
@@ -1485,6 +1492,108 @@ void BackendTests::themeAccentForegroundKeepsContrast() {
     QCOMPARE(Backend::foregroundFor(QStringLiteral("#FFD60A")), QStringLiteral("black"));
     QCOMPARE(Backend::foregroundFor(QStringLiteral("#222266")), QStringLiteral("white"));
     QCOMPARE(Backend::foregroundFor(QStringLiteral("garbage")), QStringLiteral("black"));
+}
+
+static bool dropUrls(QQuickWindow *window, const QList<QUrl> &urls) {
+    QMimeData mime;
+    mime.setUrls(urls);
+    const QPoint point(window->width() / 2, window->height() / 3);
+    QDragEnterEvent enter(point, Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(window, &enter);
+    if (!enter.isAccepted()) {
+        QDragLeaveEvent leave;
+        QCoreApplication::sendEvent(window, &leave);
+        return false;
+    }
+    QDropEvent drop(point, Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(window, &drop);
+    const bool accepted = drop.isAccepted();
+    QDragLeaveEvent leave;
+    QCoreApplication::sendEvent(window, &leave);
+    return accepted;
+}
+
+void BackendTests::qmlDropOpensThenAddsVideos() {
+    const QString second = makeVideo(QStringLiteral("dropped #2 with spaces.mp4"), 2.0, false);
+    const QString third = makeVideo(QStringLiteral("dropped-3.mp4"), 3.0, false);
+    QVERIFY(!second.isEmpty() && !third.isEmpty());
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    QmlHarness harness(backend);
+    auto *window = harness.window();
+    QVERIFY(window);
+    QTest::qWait(100);
+    Timeline *timeline = backend.timeline();
+
+    // Into an empty window, a drop opens the video, saying what it skipped.
+    QVERIFY(dropUrls(window, {QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("missing-first.mp4"))), videoUrl()}));
+    QCOMPARE(window->property("noticeText").toString(), QStringLiteral("Skipped a file that won't open."));
+    QCOMPARE(backend.source(), videoUrl());
+    QCOMPARE(timeline->clips(), wholeVideo(1.0));
+
+    // After that, drops join the edit after the clip under the playhead, in
+    // order, and one undo takes each back out.
+    QVERIFY(dropUrls(window, {QUrl::fromLocalFile(second), QUrl::fromLocalFile(third)}));
+    QCOMPARE(backend.source(), videoUrl());
+    QCOMPARE(timeline->clips(), (edit::Clips{{0, 0.0, 1.0}, {1, 0.0, 2.0}, {2, 0.0, 3.0}}));
+    QVERIFY(timeline->unexported());
+    timeline->undo();
+    QCOMPARE(timeline->clips(), (edit::Clips{{0, 0.0, 1.0}, {1, 0.0, 2.0}}));
+
+    // A file that won't open adds nothing, and says so.
+    QSignalSpy errors(&backend, &Backend::loadError);
+    QVERIFY(!dropUrls(window, {QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("missing.mp4")))}));
+    QCOMPARE(errors.count(), 1);
+    QCOMPARE(timeline->clips().size(), 2);
+}
+
+void BackendTests::qmlDropLandsAfterThePlayheadsClip() {
+    const QString second = makeVideo(QStringLiteral("drop-mid-2.mp4"), 2.0, false);
+    const QString third = makeVideo(QStringLiteral("drop-mid-3.mp4"), 3.0, false);
+    QVERIFY(!second.isEmpty() && !third.isEmpty());
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    QVERIFY(backend.load(videoUrl()));
+    Timeline *timeline = backend.timeline();
+    timeline->split(0.5);
+    QmlHarness harness(backend);
+    auto *window = harness.window();
+    QVERIFY(window);
+    QTest::qWait(100);
+
+    // In the first of two clips: the drop goes between them, in order, past
+    // a file that won't open.
+    harness.editBar()->setProperty("playheadSec", 0.25);
+    QSignalSpy errors(&backend, &Backend::loadError);
+    QVERIFY(dropUrls(window, {QUrl::fromLocalFile(second),
+                              QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("missing.mp4"))),
+                              QUrl::fromLocalFile(third)}));
+    QCOMPARE(errors.count(), 1);
+    QCOMPARE(timeline->clips(), (edit::Clips{{0, 0.0, 0.5}, {1, 0.0, 2.0}, {2, 0.0, 3.0}, {0, 0.5, 1.0}}));
+    QCOMPARE(window->property("noticeText").toString(), QStringLiteral("Skipped a file that won't open."));
+    QVERIFY(!dropUrls(window, {QUrl(QStringLiteral("file:////host/share/a.mp4"))}));
+}
+
+void BackendTests::qmlDropTakesOnlyLocalFiles() {
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    QmlHarness harness(backend);
+    auto *window = harness.window();
+    QVERIFY(window);
+    QTest::qWait(100);
+
+    QVERIFY(!dropUrls(window, {QUrl(QStringLiteral("https://example.com/video.mp4"))}));
+    QVERIFY(!dropUrls(window, {QUrl(QStringLiteral("file:-report"))}));
+    QVERIFY(!dropUrls(window, {videoUrl(), QUrl(QStringLiteral("file:http://example.com/a.mp4"))}));
+    QVERIFY(backend.source().isEmpty());
+
+    // Not while exporting: the export would mark the new edit as exported.
+    QVERIFY(backend.load(videoUrl()));
+    backend.exportClips(QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("drop-busy.mp4"))), wholeVideo(1.0));
+    QVERIFY(backend.busy());
+    QVERIFY(!dropUrls(window, {videoUrl()}));
+    QCOMPARE(backend.timeline()->clips(), wholeVideo(1.0));
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 20000);
 }
 
 QTEST_MAIN(BackendTests)

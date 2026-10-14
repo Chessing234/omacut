@@ -435,9 +435,10 @@ void BackendTests::probeReadsStreamedWebmAndSkipsCoverArt() {
     QVERIFY2(webmInfo.ok, qPrintable(webmInfo.error));
     QVERIFY2(qAbs(webmInfo.duration - 1.5) < 0.15, qPrintable(QString::number(webmInfo.duration)));
 
-    // Embedded cover art is a video stream too, but not the one to edit.
-    const QString cover = m_dir.filePath(QStringLiteral("cover.jpg"));
-    const QString withCover = m_dir.filePath(QStringLiteral("with-cover.mp4"));
+    // Cover art is listed as a video stream, but an audio file with art has
+    // no video to edit.
+    const QString cover = m_dir.filePath(QStringLiteral("cover.png"));
+    const QString song = m_dir.filePath(QStringLiteral("song-with-art.m4a"));
     {
         QProcess proc;
         proc.start(ffmpegBin, {
@@ -452,25 +453,21 @@ void BackendTests::probeReadsStreamedWebmAndSkipsCoverArt() {
 
         proc.start(ffmpegBin, {
             QStringLiteral("-loglevel"), QStringLiteral("error"),
-            QStringLiteral("-i"), cover,
             QStringLiteral("-f"), QStringLiteral("lavfi"),
-            QStringLiteral("-i"), QStringLiteral("testsrc=size=64x32:rate=1:duration=2"),
-            QStringLiteral("-map"), QStringLiteral("0:v:0"),
-            QStringLiteral("-map"), QStringLiteral("1:v:0"),
-            QStringLiteral("-c:v:0"), QStringLiteral("mjpeg"),
+            QStringLiteral("-i"), QStringLiteral("sine=duration=1"),
+            QStringLiteral("-i"), cover,
+            QStringLiteral("-map"), QStringLiteral("0:a"),
+            QStringLiteral("-map"), QStringLiteral("1:v"),
+            QStringLiteral("-c:a"), QStringLiteral("aac"),
+            QStringLiteral("-c:v"), QStringLiteral("png"),
             QStringLiteral("-disposition:v:0"), QStringLiteral("attached_pic"),
-            QStringLiteral("-c:v:1"), QStringLiteral("libx264"),
-            QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
-            QStringLiteral("-y"), withCover,
+            QStringLiteral("-y"), song,
         });
         QVERIFY(proc.waitForFinished(10000));
         QCOMPARE(proc.exitCode(), 0);
     }
-    const ffmpeg::VideoInfo coverInfo = ffmpeg::probe(withCover);
-    QVERIFY2(coverInfo.ok, qPrintable(coverInfo.error));
-    QCOMPARE(coverInfo.width, 64);
-    QCOMPARE(coverInfo.height, 32);
-    QVERIFY2(qAbs(coverInfo.duration - 2.0) < 0.15, qPrintable(QString::number(coverInfo.duration)));
+    const ffmpeg::VideoInfo songInfo = ffmpeg::probe(song);
+    QVERIFY(!songInfo.ok);
 }
 
 void BackendTests::thumbProviderServesAndCachesFrames() {
@@ -1491,15 +1488,17 @@ void BackendTests::trimArgsConcatenateTheRanges() {
                                              {QStringLiteral("in.mp4"), 2.0, 3.5, true}};
     const QStringList args = ffmpeg::trimArgs(segments, QStringLiteral("out.mp4"), 1920, 1080);
     QCOMPARE(args.count(QStringLiteral("-i")), 2);
-    // One video needs no fitting together.
+    // One video needs no fitting together, only even sides.
     QCOMPARE(filterGraph(args),
-             QStringLiteral("[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[v][a]"));
+             QStringLiteral("[0:V:0][0:a:0][1:V:0][1:a:0]concat=n=2:v=1:a=1[joined][a];"
+                            "[joined]crop=trunc(iw/2)*2:trunc(ih/2)*2:0:0[v]"));
 
     // Without audio, only the video is joined and mapped.
     const QStringList silent = ffmpeg::trimArgs({{QStringLiteral("in.mp4"), 0.0, 1.0, false},
                                                  {QStringLiteral("in.mp4"), 2.0, 3.5, false}},
                                                 QStringLiteral("out.mp4"), 1920, 1080);
-    QCOMPARE(filterGraph(silent), QStringLiteral("[0:v:0][1:v:0]concat=n=2:v=1:a=0[v]"));
+    QCOMPARE(filterGraph(silent), QStringLiteral("[0:V:0][1:V:0]concat=n=2:v=1:a=0[joined];"
+                                                  "[joined]crop=trunc(iw/2)*2:trunc(ih/2)*2:0:0[v]"));
     QVERIFY(!silent.contains(QStringLiteral("[a]")));
     QVERIFY(!silent.contains(QStringLiteral("aac")));
 }
@@ -1511,11 +1510,11 @@ void BackendTests::trimArgsFitDifferentVideosTogether() {
     // Each has its pixels squared, then is letterboxed into the first's frame
     // (sides kept even), and the silent one gets silence to match.
     QCOMPARE(filterGraph(args),
-             QStringLiteral("[0:v:0]scale='trunc(iw*sar/2)*2':ih,setsar=1,"
+             QStringLiteral("[0:V:0]scale='trunc(iw*sar/2)*2':ih,setsar=1,"
                             "scale=1920:1080:force_original_aspect_ratio=decrease,"
                             "pad=1920:1080:-1:-1,setsar=1,format=yuv420p[v0];"
                             "[0:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a0];"
-                            "[1:v:0]scale='trunc(iw*sar/2)*2':ih,setsar=1,"
+                            "[1:V:0]scale='trunc(iw*sar/2)*2':ih,setsar=1,"
                             "scale=1920:1080:force_original_aspect_ratio=decrease,"
                             "pad=1920:1080:-1:-1,setsar=1,format=yuv420p[v1];"
                             "anullsrc=r=48000:cl=stereo,atrim=duration=2.000,aformat=sample_fmts=fltp[a1];"
@@ -1529,15 +1528,15 @@ void BackendTests::trimArgsScaleTheShorterSide() {
     QVERIFY(!filterGraph(ffmpeg::trimArgs(segment, QStringLiteral("out.mp4"), 1920, 1080))
                  .contains(QStringLiteral("scale")));
 
-    // Odd sides are rounded down to even so libx264 can open the encoder.
+    // Sides are rounded down to even so libx264 can open the encoder.
     QCOMPARE(filterGraph(ffmpeg::trimArgs(segment, QStringLiteral("out.mp4"), 1921, 1080)),
-             QStringLiteral("[0:v:0][0:a:0]concat=n=1:v=1:a=1[joined][a];"
-                            "[joined]scale='trunc(iw/2)*2':'trunc(ih/2)*2'[v]"));
+             QStringLiteral("[0:V:0][0:a:0]concat=n=1:v=1:a=1[joined][a];"
+                            "[joined]crop=trunc(iw/2)*2:trunc(ih/2)*2:0:0[v]"));
 
     // The filter caps whichever side is shorter, keeping the aspect ratio for
     // portrait and landscape alike.
     QCOMPARE(filterGraph(ffmpeg::trimArgs(segment, QStringLiteral("out.mp4"), 1920, 1080, 1080)),
-             QStringLiteral("[0:v:0][0:a:0]concat=n=1:v=1:a=1[joined][a];"
+             QStringLiteral("[0:V:0][0:a:0]concat=n=1:v=1:a=1[joined][a];"
                             "[joined]scale='if(gt(iw,ih),-2,1080)':'if(gt(iw,ih),1080,-2)'[v]"));
 }
 

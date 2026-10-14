@@ -15,26 +15,11 @@ constexpr int kProbeTimeoutMs = 15000;
 // Poll granularity while waiting on a thumbnail child, so cancellation is prompt.
 constexpr int kThumbPollMs = 50;
 
-// Matroska/WebM muxers often store duration as a "HH:MM:SS.nnnnnnnnn" tag.
-double parseTagDuration(const QJsonObject &tags) {
-    for (auto it = tags.begin(); it != tags.end(); ++it) {
-        if (!it.key().startsWith(QStringLiteral("DURATION"), Qt::CaseInsensitive))
-            continue;
-        const QStringList parts = it.value().toString().split(QLatin1Char(':'));
-        if (parts.size() != 3)
-            continue;
-        bool hOk = false, mOk = false, sOk = false;
-        const int h = parts[0].toInt(&hOk);
-        const int m = parts[1].toInt(&mOk);
-        const double s = parts[2].toDouble(&sOk);
-        if (hOk && mOk && sOk)
-            return h * 3600.0 + m * 60.0 + s;
-    }
-    return 0.0;
-}
-
 // Streamed WebM/MKV captures (e.g. from a browser's MediaRecorder) have no
-// duration in the header or tags; scan the video stream's packet timestamps.
+// duration in the header; scan the video stream's packet timestamps. That
+// reads the whole file, on the UI thread, so it's only the last resort: a
+// couple of hours of cached video takes under a second, a slow disk up to
+// the probe timeout.
 double probePacketDuration(const QString &ffprobe, const QString &path, int streamIndex) {
     QProcess proc;
     proc.start(ffprobe, {
@@ -140,19 +125,15 @@ VideoInfo probe(const QString &path) {
     if (qAbs(rotation) % 180 == 90)
         std::swap(info.width, info.height);
 
-    // Duration can live on the stream, on the container, in a Matroska DURATION
-    // tag, or (for streamed WebM captures) on the last video packet.
+    // Duration can live on the stream, on the container, or (for streamed
+    // WebM captures) only on the last video packet.
     QString durationStr = stream.value("duration").toString();
     if (durationStr.isEmpty())
         durationStr = root.value("format").toObject().value("duration").toString();
     if (!durationStr.isEmpty()) {
         info.duration = durationStr.toDouble();
     } else {
-        info.duration = parseTagDuration(stream.value("tags").toObject());
-        if (info.duration <= 0.0)
-            info.duration = parseTagDuration(root.value("format").toObject().value("tags").toObject());
-        if (info.duration <= 0.0)
-            info.duration = probePacketDuration(ffprobe, path, stream.value("index").toInt());
+        info.duration = probePacketDuration(ffprobe, path, stream.value("index").toInt());
         if (info.duration <= 0.0) {
             info.error = "Could not determine the video duration.";
             return info;
@@ -219,6 +200,7 @@ QStringList trimArgs(const QList<Segment> &segments, const QString &dst,
     QStringList args = {"-y", "-loglevel", "error", "-progress", "pipe:1"};
     // One input per segment: -ss before -i seeks fast and -t bounds it, so
     // only what survives the cut is decoded. The concat filter joins them.
+    // V:0 is the first video stream that isn't cover art, as probe picks.
     QString graph;
     QString inputs;
     for (int i = 0; i < segments.size(); ++i) {
@@ -227,13 +209,13 @@ QStringList trimArgs(const QList<Segment> &segments, const QString &dst,
         args << "-ss" << QString::number(segment.start, 'f', 3) << "-t" << length
              << "-i" << segment.path;
         if (!mixed) {
-            inputs += QString("[%1:v:0]").arg(i) + (audio ? QString("[%1:a:0]").arg(i) : QString());
+            inputs += QString("[%1:V:0]").arg(i) + (audio ? QString("[%1:a:0]").arg(i) : QString());
             continue;
         }
         // Concat needs one frame size and one audio format throughout. Pixels
         // are squared first, so non-square video keeps its shape; -1 centres
         // the padding; libx264 needs even sides.
-        graph += QString("[%1:v:0]scale='trunc(iw*sar/2)*2':ih,setsar=1,"
+        graph += QString("[%1:V:0]scale='trunc(iw*sar/2)*2':ih,setsar=1,"
                          "scale=%2:%3:force_original_aspect_ratio=decrease,"
                          "pad=%2:%3:-1:-1,setsar=1,format=yuv420p[v%1];")
                      .arg(i).arg(width / 2 * 2).arg(height / 2 * 2);
@@ -251,8 +233,10 @@ QStringList trimArgs(const QList<Segment> &segments, const QString &dst,
     if (scaleHeight > 0)
         graph += QString("[joined]%1;[joined]scale='if(gt(iw,ih),-2,%2)':'if(gt(iw,ih),%2,-2)'[v]")
                      .arg(audio ? "[a]" : "").arg(scaleHeight);
-    else if (!mixed && (width % 2 != 0 || height % 2 != 0))
-        graph += QString("[joined]%1;[joined]scale='trunc(iw/2)*2':'trunc(ih/2)*2'[v]")
+    // libx264 needs even sides. Judged on the decoded frame, since the probed
+    // size is the displayed one; cropping the odd pixel keeps pixels square.
+    else if (!mixed)
+        graph += QString("[joined]%1;[joined]crop=trunc(iw/2)*2:trunc(ih/2)*2:0:0[v]")
                      .arg(audio ? "[a]" : "");
     else
         graph += QString("[v]") + (audio ? "[a]" : "");

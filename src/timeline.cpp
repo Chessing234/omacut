@@ -6,20 +6,27 @@
 
 QVariantList Timeline::clipList() const {
     QVariantList result;
-    for (const edit::Range &clip : m_clips)
-        result.append(QVariantMap{{QStringLiteral("start"), clip.start},
-                                  {QStringLiteral("end"), clip.end}});
+    double start = 0.0;
+    for (const edit::Clip &clip : m_clips) {
+        result.append(QVariantMap{{QStringLiteral("source"), clip.source},
+                                  {QStringLiteral("in"), clip.in},
+                                  {QStringLiteral("out"), clip.out},
+                                  {QStringLiteral("start"), start},
+                                  {QStringLiteral("end"), start + clip.length()}});
+        start += clip.length();
+    }
     return result;
 }
 
 bool Timeline::unexported() const {
-    return !m_clips.isEmpty() && !edit::untouched(m_clips, m_duration)
+    return !m_clips.isEmpty() && !edit::untouched(m_clips, m_sourceDurations.value(0))
         && m_clips != m_exported;
 }
 
 void Timeline::reset(double duration) {
-    m_duration = std::max(0.0, duration);
-    m_clips = m_duration > 0.0 ? edit::whole(m_duration) : edit::Clips{};
+    duration = std::max(0.0, duration);
+    m_sourceDurations = {duration};
+    m_clips = duration > 0.0 ? edit::Clips{{0, 0.0, duration}} : edit::Clips{};
     m_exported.clear();
     m_undo.clear();
     m_redo.clear();
@@ -27,15 +34,21 @@ void Timeline::reset(double duration) {
     emit changed();
 }
 
+int Timeline::addSource(double duration, double t) {
+    m_sourceDurations.append(std::max(0.0, duration));
+    const int source = m_sourceDurations.size() - 1;
+    edit::Clips next = m_clips;
+    next.insert(m_clips.isEmpty() ? 0 : clipAt(t) + 1, {source, 0.0, m_sourceDurations.last()});
+    apply(next);
+    return source;
+}
+
 void Timeline::markExported(const edit::Clips &clips) {
     m_exported = clips;
     emit changed();
 }
 
-void Timeline::apply(edit::Clips next) {
-    // Mid-drag, clips keep their indices; the gesture's end normalizes.
-    if (!m_gesture)
-        next = edit::normalized(next, m_duration);
+void Timeline::apply(const edit::Clips &next) {
     if (next == m_clips || next.isEmpty())
         return;
     if (!m_gesture || !m_gestureRecorded) {
@@ -48,92 +61,89 @@ void Timeline::apply(edit::Clips next) {
 }
 
 int Timeline::clipAt(double t) const {
+    double end = 0.0;
     for (int i = 0; i < m_clips.size(); ++i) {
-        if (t >= m_clips[i].start && t < m_clips[i].end)
+        end += m_clips[i].length();
+        if (t < end)
             return i;
     }
-    return -1;
+    return m_clips.size() - 1;
 }
 
-int Timeline::gapAt(double t) const {
-    int n = 0;
-    while (n < m_clips.size() && m_clips[n].end <= t)
-        ++n;
-    return n;
-}
-
-double Timeline::playableFrom(double t) const {
-    // A playhead within a frame or so of a clip's end has finished it.
-    for (const edit::Range &clip : m_clips) {
-        if (t < clip.end - 0.03)
-            return std::max(t, clip.start);
-    }
-    return -1.0;
+double Timeline::clipStart(int index) const {
+    double start = 0.0;
+    for (int i = 0; i < index && i < m_clips.size(); ++i)
+        start += m_clips[i].length();
+    return start;
 }
 
 double Timeline::edgeFrom(double t, int direction) const {
-    if (m_clips.isEmpty())
-        return 0.0;
-    double target = direction > 0 ? m_clips.last().end : m_clips.first().start;
-    for (const edit::Range &clip : m_clips) {
-        for (const double edge : {clip.start, clip.end}) {
-            if (direction > 0 && edge > t + 0.01)
-                return edge;
-            if (direction < 0 && edge < t - 0.01)
-                target = edge;
-        }
+    double target = direction > 0 ? duration() : 0.0;
+    double edge = 0.0;
+    for (int i = 0; i <= m_clips.size(); ++i) {
+        if (direction > 0 && edge > t + 0.01)
+            return edge;
+        if (direction < 0 && edge < t - 0.01)
+            target = edge;
+        if (i < m_clips.size())
+            edge += m_clips[i].length();
     }
     return target;
 }
 
-void Timeline::split(double time) {
-    for (int i = 0; i < m_clips.size(); ++i) {
-        const edit::Range clip = m_clips[i];
-        if (time - clip.start < edit::minimumClip || clip.end - time < edit::minimumClip)
-            continue;
-        edit::Clips next = m_clips;
-        next[i].end = time;
-        next.insert(i + 1, {time, clip.end});
-        apply(next);
-        return;
-    }
+bool Timeline::canJoin(int index) const {
+    return index >= 0 && index + 1 < m_clips.size()
+        && m_clips[index].source == m_clips[index + 1].source
+        && m_clips[index].out == m_clips[index + 1].in;
 }
 
-void Timeline::setClip(int index, double start, double end) {
-    if (index < 0 || index >= m_clips.size())
+void Timeline::split(double t) {
+    const int i = clipAt(t);
+    if (i < 0)
         return;
-    // A clip can grow into a gap, never over its neighbours.
-    const double low = index > 0 ? m_clips[index - 1].end : 0.0;
-    const double high = index + 1 < m_clips.size() ? m_clips[index + 1].start : m_duration;
-    start = std::clamp(start, low, high);
-    end = std::clamp(end, low, high);
-    if (end - start < edit::minimumClip)
+    const edit::Clip clip = m_clips[i];
+    const double at = clip.in + (t - clipStart(i));
+    if (at - clip.in < edit::minimumClip || clip.out - at < edit::minimumClip)
         return;
     edit::Clips next = m_clips;
-    next[index] = {start, end};
+    next[i].out = at;
+    next.insert(i + 1, {clip.source, at, clip.out});
     apply(next);
 }
 
-void Timeline::moveEdge(int index, bool start, double t) {
+void Timeline::setClip(int index, double in, double out) {
     if (index < 0 || index >= m_clips.size())
         return;
-    const edit::Range clip = m_clips[index];
+    const double sourceEnd = m_sourceDurations.value(m_clips[index].source);
+    in = std::clamp(in, 0.0, sourceEnd);
+    out = std::clamp(out, 0.0, sourceEnd);
+    if (out - in < edit::minimumClip)
+        return;
+    edit::Clips next = m_clips;
+    next[index].in = in;
+    next[index].out = out;
+    apply(next);
+}
+
+void Timeline::moveEdge(int index, bool start, double sourceTime) {
+    if (index < 0 || index >= m_clips.size())
+        return;
+    const edit::Clip clip = m_clips[index];
     if (start)
-        setClip(index, std::min(t, clip.end - edit::minimumClip), clip.end);
+        setClip(index, std::min(sourceTime, clip.out - edit::minimumClip), clip.out);
     else
-        setClip(index, clip.start, std::max(t, clip.start + edit::minimumClip));
+        setClip(index, clip.in, std::max(sourceTime, clip.in + edit::minimumClip));
 }
 
 void Timeline::trimTo(double t, bool start) {
-    int i = clipAt(t);
+    const int i = clipAt(t);
     if (i < 0)
-        i = start ? gapAt(t) : gapAt(t) - 1;
-    if (i < 0 || i >= m_clips.size())
         return;
+    const double at = m_clips[i].in + (t - clipStart(i));
     if (start)
-        setClip(i, t, m_clips[i].end);
+        setClip(i, at, m_clips[i].out);
     else
-        setClip(i, m_clips[i].start, t);
+        setClip(i, m_clips[i].in, at);
 }
 
 void Timeline::removeClip(int index) {
@@ -144,30 +154,23 @@ void Timeline::removeClip(int index) {
     apply(next);
 }
 
-void Timeline::removeOrRestoreAt(double t) {
-    const int i = clipAt(t);
-    if (i >= 0)
-        removeClip(i);
-    else
-        restoreGap(gapAt(t));
+void Timeline::removeAt(double t) {
+    removeClip(clipAt(t));
 }
 
-void Timeline::restoreGap(int gap) {
-    if (m_clips.isEmpty() || gap < 0 || gap > m_clips.size())
+void Timeline::moveClip(int from, int to) {
+    if (from < 0 || from >= m_clips.size() || to < 0 || to >= m_clips.size())
         return;
-    if (gap == 0)
-        setClip(0, 0.0, m_clips[0].end);
-    else if (gap == m_clips.size())
-        setClip(gap - 1, m_clips[gap - 1].start, m_duration);
-    else
-        joinClips(gap - 1);
+    edit::Clips next = m_clips;
+    next.move(from, to);
+    apply(next);
 }
 
 void Timeline::joinClips(int index) {
-    if (index < 0 || index + 1 >= m_clips.size())
+    if (!canJoin(index))
         return;
     edit::Clips next = m_clips;
-    next[index].end = next[index + 1].end;
+    next[index].out = next[index + 1].out;
     next.removeAt(index + 1);
     apply(next);
 }
@@ -180,15 +183,7 @@ void Timeline::beginGesture() {
 }
 
 void Timeline::endGesture() {
-    if (!m_gesture)
-        return;
     m_gesture = false;
-    // Normalizing can drop a clip too short to keep; never let that empty the video.
-    const edit::Clips next = edit::normalized(m_clips, m_duration);
-    if (!next.isEmpty() && next != m_clips) {
-        m_clips = next;
-        emit changed();
-    }
 }
 
 void Timeline::undo() {

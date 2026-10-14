@@ -6,18 +6,17 @@
 #include <QFileInfo>
 #include <QProcess>
 #include <QTextStream>
+#include <QVariantMap>
 
 #include <cstdio>
 #include <memory>
+#include <utility>
 
 #include "filepicker.h"
 #include "portalfilepicker.h"
 #include "thumbprovider.h"
-#include "thumbworker.h"
 
 namespace {
-constexpr int kThumbCount = 12;
-constexpr int kThumbRevealMs = 70;
 const QString kDefaultAccent = QStringLiteral("#FFD60A");
 
 QString omarchyCurrentDir() {
@@ -55,8 +54,6 @@ Backend::Backend(ThumbProvider *provider, FilePicker *filePicker, QObject *paren
     if (!m_filePicker->parent())
         m_filePicker->setParent(this);
     wireFilePicker();
-    m_thumbRevealTimer.setInterval(kThumbRevealMs);
-    connect(&m_thumbRevealTimer, &QTimer::timeout, this, &Backend::revealNextThumb);
 
     // Follow omarchy theme switches live. The theme lives behind a symlink that
     // gets swapped, so the reload also re-arms the watch paths every time.
@@ -70,13 +67,18 @@ Backend::Backend(ThumbProvider *provider, FilePicker *filePicker, QObject *paren
     loadThemeAccent();
 }
 
-Backend::~Backend() {
-    stopThumbs();
-}
+Backend::~Backend() = default;
 
 void Backend::wireFilePicker() {
-    connect(m_filePicker, &FilePicker::openSelected, this, &Backend::load);
-    connect(m_filePicker, &FilePicker::exportSelected, this, &Backend::exportClip);
+    connect(m_filePicker, &FilePicker::openSelected, this, [this](const QUrl &url) {
+        if (std::exchange(m_adding, false))
+            addVideo(url, m_addAt);
+        else
+            load(url);
+    });
+    connect(m_filePicker, &FilePicker::exportSelected, this, [this](const QUrl &url, int scaleHeight) {
+        exportClips(url, m_exportDialogClips, scaleHeight);
+    });
     connect(m_filePicker, &FilePicker::failed, this, &Backend::loadError);
 }
 
@@ -156,49 +158,77 @@ void Backend::watchTheme() {
         m_themeWatcher.addPath(omarchyColorsPath());
 }
 
-bool Backend::load(const QUrl &url) {
-    const QString path = url.toLocalFile();
-    const ffmpeg::VideoInfo info = ffmpeg::probe(path);
-    if (!info.ok) {
-        emit loadError(info.error);
+QVariantList Backend::videoList() const {
+    QVariantList result;
+    for (const Video &video : m_videos)
+        result.append(QVariantMap{{QStringLiteral("url"), video.url},
+                                  {QStringLiteral("thumbKey"), video.thumbKey}});
+    return result;
+}
+
+bool Backend::probeVideo(const QUrl &url, Video *video) {
+    video->info = ffmpeg::probe(url.toLocalFile());
+    if (!video->info.ok) {
+        emit loadError(video->info.error);
         return false;
     }
+    video->url = url;
+    video->thumbKey = ++m_nextThumbKey;
+    m_provider->setVideo(video->thumbKey, video->info.path);
+    return true;
+}
 
-    m_info = info;
-    m_path = path;
-    m_source = url;
+bool Backend::load(const QUrl &url) {
+    // A running export marks its clips exported when it finishes, which
+    // must not land on a different set of videos.
+    if (m_busy)
+        return false;
 
-    // New video: drop the old filmstrip and bump the revision so QML reloads.
-    stopThumbs();
-    m_thumbStart = 0.0;
-    m_thumbLen = m_info.duration;
-    m_fullThumbs = QVector<QImage>(kThumbCount);
-    m_fullThumbsComplete = false;
-    m_thumbCount = kThumbCount;
-    m_thumbAvailableCount = 0;
-    m_thumbReadyCount = 0;
-    m_thumbWorkerDone = false;
-    ++m_thumbRevision;
-    m_provider->setImages(QVector<QImage>(kThumbCount));
-    emit thumbsChanged();
+    Video video;
+    if (!probeVideo(url, &video))
+        return false;
 
+    m_videos = {video};
+    m_timeline.reset(video.info.duration);
+    emit videosChanged();
     emit infoChanged();
+    return true;
+}
 
-    setStatus(QStringLiteral("Loading..."));
-    startThumbs();
+bool Backend::addVideo(const QUrl &url, double t) {
+    if (m_busy)
+        return false;
+    if (m_videos.isEmpty())
+        return load(url);
+
+    Video video;
+    if (!probeVideo(url, &video))
+        return false;
+
+    m_videos.append(video);
+    emit videosChanged();
+    m_timeline.addSource(video.info.duration, t);
     return true;
 }
 
 void Backend::openVideoDialog() {
+    m_adding = false;
     m_filePicker->openVideo();
 }
 
-void Backend::exportDialog(double start, double end) {
-    if (m_path.isEmpty() || !m_info.ok)
+void Backend::addVideoDialog(double t) {
+    m_adding = !m_videos.isEmpty();
+    m_addAt = t;
+    m_filePicker->openVideo();
+}
+
+void Backend::exportDialog() {
+    if (m_videos.isEmpty())
         return;
 
-    m_filePicker->exportVideo(suggestedExportUrl(), start, end,
-                              exportHeights(m_info.width, m_info.height));
+    m_exportDialogClips = m_timeline.clips();
+    const ffmpeg::VideoInfo &frame = m_videos.value(m_exportDialogClips.value(0).source).info;
+    m_filePicker->exportVideo(suggestedExportUrl(), exportHeights(frame.width, frame.height));
 }
 
 QList<int> Backend::exportHeights(int width, int height) {
@@ -211,114 +241,31 @@ QList<int> Backend::exportHeights(int width, int height) {
     return heights;
 }
 
-void Backend::startThumbs() {
-    auto *worker = new ThumbWorker(m_path, m_thumbStart, m_thumbLen, kThumbCount);
-    m_thumbWorker = worker;
-    // Pair the pointer check with the revision: a recycled worker address could
-    // otherwise let a stale queued callback write into the new filmstrip.
-    const int revision = m_thumbRevision;
-
-    connect(worker, &ThumbWorker::thumbReady, this, [this, worker, revision](int index, const QImage &image) {
-        if (worker != m_thumbWorker || revision != m_thumbRevision)
-            return;
-        m_provider->setImage(index, image);
-        // Thumbs arrive in order, so the strip is fully cached at the last one.
-        if (m_thumbStart <= 0.0 && m_thumbLen >= m_info.duration) {
-            m_fullThumbs[index] = image;
-            if (index == kThumbCount - 1)
-                m_fullThumbsComplete = true;
-        }
-        m_thumbAvailableCount = qMax(m_thumbAvailableCount, index + 1);
-        if (m_thumbReadyCount == 0)
-            revealNextThumb();
-        if (!m_thumbRevealTimer.isActive())
-            m_thumbRevealTimer.start();
-    });
-    connect(worker, &ThumbWorker::finished, this, [this, worker, revision] {
-        if (worker == m_thumbWorker && revision == m_thumbRevision) {
-            m_thumbWorker = nullptr;
-            m_thumbWorkerDone = true;
-            if (m_thumbReadyCount >= m_thumbCount)
-                setStatus(QString());
-            else if (!m_thumbRevealTimer.isActive())
-                m_thumbRevealTimer.start();
-        }
-        worker->deleteLater();
-    });
-    worker->start();
-}
-
-void Backend::revealNextThumb() {
-    if (m_thumbReadyCount < m_thumbAvailableCount) {
-        ++m_thumbReadyCount;
-        emit thumbsChanged();
-    }
-
-    if (m_thumbReadyCount < m_thumbAvailableCount)
-        return;
-
-    m_thumbRevealTimer.stop();
-    if (m_thumbWorkerDone && m_thumbReadyCount >= m_thumbCount)
-        setStatus(QString());
-}
-
-void Backend::stopThumbs() {
-    m_thumbRevealTimer.stop();
-    if (!m_thumbWorker)
-        return;
-
-    ThumbWorker *worker = m_thumbWorker;
-    m_thumbWorker = nullptr;
-    worker->disconnect(this);
-    worker->requestStop();
-    worker->wait();
-    delete worker;
-}
-
-void Backend::requestThumbs(double start, double end) {
-    if (m_path.isEmpty() || !m_info.ok)
-        return;
-    start = qBound(0.0, start, m_info.duration);
-    end = qBound(start, end, m_info.duration);
-    if (end - start <= 0.0 || (start == m_thumbStart && end - start == m_thumbLen))
-        return;
-
-    stopThumbs();
-    m_thumbStart = start;
-    m_thumbLen = end - start;
-    ++m_thumbRevision;
-
-    // Zooming back out: restore the cached full-length strip instantly.
-    if (start <= 0.0 && end >= m_info.duration && m_fullThumbsComplete) {
-        m_provider->setImages(m_fullThumbs);
-        m_thumbAvailableCount = kThumbCount;
-        m_thumbReadyCount = kThumbCount;
-        m_thumbWorkerDone = true;
-        emit thumbsChanged();
-        return;
-    }
-
-    m_thumbAvailableCount = 0;
-    m_thumbReadyCount = 0;
-    m_thumbWorkerDone = false;
-    m_provider->setImages(QVector<QImage>(kThumbCount));
-    emit thumbsChanged();
-    startThumbs();
-}
-
 QUrl Backend::suggestedExportUrl() const {
-    if (m_path.isEmpty())
+    if (m_videos.isEmpty())
         return {};
-    const QFileInfo src(m_path);
+    const QFileInfo src(m_videos.first().info.path);
     const QString target = src.dir().filePath(src.completeBaseName() + "_trimmed.mp4");
     return QUrl::fromLocalFile(target);
 }
 
-void Backend::exportClip(const QUrl &dst, double start, double end, int scaleHeight) {
-    if (m_path.isEmpty() || !m_info.ok || m_busy)
+void Backend::exportClips(const QUrl &dst, const edit::Clips &clips, int scaleHeight) {
+    if (m_videos.isEmpty() || m_busy)
         return;
 
-    if (end - start <= 0.0) {
+    QList<ffmpeg::Segment> segments;
+    // The first clip that still has its video sets the frame.
+    int frameSource = -1;
+    for (const edit::Clip &clip : edit::merged(clips)) {
+        if (clip.source < 0 || clip.source >= m_videos.size())
+            continue;
+        if (frameSource < 0)
+            frameSource = clip.source;
+        const ffmpeg::VideoInfo &info = m_videos[clip.source].info;
+        segments.append({info.path, clip.in, clip.out, info.audio});
+    }
+    const double clipLen = edit::duration(clips);
+    if (segments.isEmpty() || clipLen <= 0.0) {
         emit exportFailed("The selected clip has no length.");
         return;
     }
@@ -347,14 +294,14 @@ void Backend::exportClip(const QUrl &dst, double start, double end, int scaleHei
     // success, so failed/cancelled exports preserve any existing file.
     const QString tmpPath = outPath + QStringLiteral(".omacut-part.mp4");
     QFile::remove(tmpPath);
-    const QStringList args = ffmpeg::trimArgs(m_path, tmpPath, start, end, scaleHeight);
+    const ffmpeg::VideoInfo &frame = m_videos[frameSource].info;
+    const QStringList args = ffmpeg::trimArgs(segments, tmpPath, frame.width, frame.height, scaleHeight);
 
     auto *proc = new QProcess(this);
     auto completed = std::make_shared<bool>(false);
 
     // ffmpeg -progress writes key=value blocks to stdout as it encodes;
-    // out_time_us against the clip length gives the percentage.
-    const double clipLen = end - start;
+    // out_time_us against the kept length gives the percentage.
     auto progressBuf = std::make_shared<QByteArray>();
     connect(proc, &QProcess::readyReadStandardOutput, this,
             [this, proc, progressBuf, clipLen, completed] {
@@ -375,7 +322,7 @@ void Backend::exportClip(const QUrl &dst, double start, double end, int scaleHei
             });
 
     connect(proc, &QProcess::finished, this,
-            [this, proc, outPath, tmpPath, completed](int code, QProcess::ExitStatus exitStatus) {
+            [this, proc, outPath, tmpPath, completed, clips](int code, QProcess::ExitStatus exitStatus) {
                 if (*completed)
                     return;
                 *completed = true;
@@ -391,6 +338,7 @@ void Backend::exportClip(const QUrl &dst, double start, double end, int scaleHei
                 }
                 setBusy(false);
                 setStatus(QString());
+                m_timeline.markExported(clips);
                 emit exportDone(outPath);
             });
     connect(proc, &QProcess::errorOccurred, this,

@@ -94,6 +94,8 @@ private:
     };
     // Probes the video and registers its frames with the thumbnail provider.
     bool probeVideo(const QUrl &url, Video *video);
+    // Whether path is the file behind one of the loaded videos.
+    bool isVideoPath(const QString &path) const;
 
     ThumbProvider *m_provider;
     FilePicker *m_filePicker;

@@ -153,16 +153,15 @@ ApplicationWindow {
     // The playback and editing shortcuts go quiet while the quit confirmation is
     // up — a disabled Shortcut also stops swallowing its key, which lets the
     // dialog's own keyboard navigation receive the arrows, Space and Enter.
+    // 0-9 jump to 0%-90% of the whole edit.
     Instantiator {
         model: 10
         delegate: Shortcut {
             required property int index
             sequence: index.toString()
             context: Qt.ApplicationShortcut
-            enabled: win.hasVideo && backend.duration > 0 && !backend.busy
-                && !win.quitConfirmVisible && !win.helpVisible
-            onActivated: movePlayheadTo(trimBar.startSec
-                + (trimBar.endSec - trimBar.startSec) * index / 10)
+            enabled: win.editing
+            onActivated: seekTo(timeline.duration * index / 10)
         }
     }
 
@@ -842,7 +841,7 @@ ApplicationWindow {
                 Repeater {
                     model: [
                         { keys: "Space", action: "Play / pause" },
-                        { keys: "0–9", action: "Jump to 0%–90% of the trim" },
+                        { keys: "0–9", action: "Jump to 0%–90% of the edit" },
                         { keys: "← / →", action: "Move playhead 1s" },
                         { keys: "Shift ← / →", action: "Move playhead 5s" },
                         { keys: "Alt ← / →", action: "Move playhead 0.2s" },

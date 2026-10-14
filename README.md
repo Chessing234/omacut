@@ -22,7 +22,7 @@ Handles catch on neighbouring clip edges and the playhead.
 ## Hotkeys
 
 - *Space*: Start/stop video playback.
-- *0–9*: Jump to 0%–90% of the current trim (0 goes to the trim start, 1 to 10%, etc.).
+- *0–9*: Jump to 0%–90% of the edit.
 - *Left/Right*: Move the playhead by 1 second.
 - *Shift+Left/Right*: Move the playhead by 5 seconds.
 - *Alt+Left/Right*: Move the playhead by 0.2 seconds.

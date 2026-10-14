@@ -205,6 +205,7 @@ private slots:
     void qmlDoesNotCreateAudioOutputWithoutVideo();
     void qmlShortcutsTriggerBackendActions();
     void qmlArrowKeysMoveThePlayhead();
+    void qmlNumberKeysJumpThroughTheEdit();
     void qmlSpaceChordsSetTheClipEdges();
     void qmlKeysSplitAndRemoveClips();
     void qmlBracketsJumpBetweenClipEdges();
@@ -836,6 +837,32 @@ static double playhead(QmlHarness &harness) {
 
 static QUrl placeholderUrl(const QTemporaryDir &dir) {
     return QUrl::fromLocalFile(dir.filePath(QStringLiteral("shortcut-placeholder.mp4")));
+}
+
+void BackendTests::qmlNumberKeysJumpThroughTheEdit() {
+    ShortcutBackend backend(placeholderUrl(m_dir), 20.0);
+    QmlHarness harness(backend);
+    QQuickWindow *window = showEditor(harness, backend);
+    QVERIFY2(window, qPrintable(mainQmlPath()));
+    QVERIFY(harness.editBar());
+
+    QTest::keyClick(window, Qt::Key_5);
+    QTRY_COMPARE_WITH_TIMEOUT(playhead(harness), 10.0, 3000);
+    QTest::keyClick(window, Qt::Key_9);
+    QTRY_COMPARE_WITH_TIMEOUT(playhead(harness), 18.0, 3000);
+    QTest::keyClick(window, Qt::Key_0);
+    QTRY_COMPARE_WITH_TIMEOUT(playhead(harness), 0.0, 3000);
+
+    // Across the whole edit, not just the clip under the playhead.
+    backend.timeline.split(10.0);
+    QTest::keyClick(window, Qt::Key_7);
+    QTRY_COMPARE_WITH_TIMEOUT(playhead(harness), 14.0, 3000);
+
+    // Quiet while the quit confirmation is up.
+    window->setProperty("quitConfirmVisible", true);
+    QTest::keyClick(window, Qt::Key_2);
+    QTest::qWait(50);
+    QCOMPARE(playhead(harness), 14.0);
 }
 
 void BackendTests::qmlArrowKeysMoveThePlayhead() {

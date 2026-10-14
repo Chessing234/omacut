@@ -684,6 +684,23 @@ ApplicationWindow {
                 }
                 onClicked: openVideo()
             }
+
+            // With no video open there's no status line, so a file that
+            // won't open says why here.
+            Label {
+                anchors.top: openVideoButton.bottom
+                anchors.topMargin: 16
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: Math.min(implicitWidth, parent.width - 32)
+                visible: !win.hasVideo && win.noticeText !== ""
+                textFormat: Text.PlainText
+                text: win.noticeText
+                color: win.accent
+                font.pixelSize: 13
+                font.family: "monospace"
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.Wrap
+            }
         }
 
         // --- timeline ---
@@ -746,6 +763,8 @@ ApplicationWindow {
                 anchors.centerIn: parent
                 width: parent.width
                 visible: win.statusText !== ""
+                // ffprobe's and ffmpeg's errors are shown as they are.
+                textFormat: Text.PlainText
                 text: win.statusText
                 color: win.noticeText !== "" ? win.accent : "#b8b8bc"
                 font.pixelSize: 13
@@ -798,7 +817,7 @@ ApplicationWindow {
     Rectangle {
         visible: win.helpVisible
         anchors.fill: parent
-        color: "#000000cc"
+        color: "#cc000000"
 
         MouseArea {
             anchors.fill: parent
@@ -870,7 +889,7 @@ ApplicationWindow {
     Rectangle {
         visible: win.quitConfirmVisible
         anchors.fill: parent
-        color: "#000000cc"
+        color: "#cc000000"
         onVisibleChanged: {
             if (visible)
                 quitExportButton.forceActiveFocus();
@@ -960,6 +979,8 @@ ApplicationWindow {
             primeFallback.stop();
             player.priming = false;
             player.pendingMs = -1;
+            // Load afresh, even the same path: it may be a new file now.
+            player.source = "";
             editBar.zoomed = false;
             editBar.playheadSec = 0;
             if (win.hasVideo)

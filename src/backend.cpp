@@ -168,6 +168,15 @@ void Backend::watchTheme() {
         m_themeWatcher.addPath(omarchyColorsPath());
 }
 
+bool Backend::isVideoPath(const QString &path) const {
+    const QString target = QFileInfo(path).canonicalFilePath();
+    for (const Video &video : m_videos) {
+        if (QFileInfo(video.info.path).canonicalFilePath() == target)
+            return true;
+    }
+    return false;
+}
+
 QVariantList Backend::videoList() const {
     QVariantList result;
     for (const Video &video : m_videos)
@@ -177,7 +186,14 @@ QVariantList Backend::videoList() const {
 }
 
 bool Backend::probeVideo(const QUrl &url, Video *video) {
-    video->info = ffmpeg::probe(url.toLocalFile());
+    // Only absolute local paths reach ffprobe: "file:-report" would be read
+    // as an option, and "file:http://..." as a network address.
+    const QString path = url.toLocalFile();
+    if (!url.isLocalFile() || !QDir::isAbsolutePath(path)) {
+        emit loadError(QStringLiteral("Only local files can be opened."));
+        return false;
+    }
+    video->info = ffmpeg::probe(path);
     if (!video->info.ok) {
         emit loadError(video->info.error);
         return false;
@@ -348,7 +364,15 @@ void Backend::exportClips(const QUrl &dst, const edit::Clips &clips, int scaleHe
                 }
                 setBusy(false);
                 setStatus(QString());
-                m_timeline.markExported(clips);
+                // Written over one of its own videos: the clips' times point
+                // into a file that's gone, so start over from what was saved.
+                if (!isVideoPath(outPath)) {
+                    m_timeline.markExported(clips);
+                } else if (!load(QUrl::fromLocalFile(outPath))) {
+                    emit exportDone(outPath);
+                    emit loadError(QStringLiteral("Saved, but couldn't reopen it, so the clips no longer match the file."));
+                    return;
+                }
                 emit exportDone(outPath);
             });
     connect(proc, &QProcess::errorOccurred, this,

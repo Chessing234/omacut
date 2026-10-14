@@ -186,6 +186,7 @@ private slots:
     void initTestCase();
     void openDialogDelegatesToFilePicker();
     void pickerSelectionLoadsVideo();
+    void loadRefusesAnythingButAbsoluteLocalPaths();
     void addingAVideoInsertsItAfterThePlayheadsClip();
     void probeReportsTheDisplayedSize();
     void thumbProviderServesAndCachesFrames();
@@ -198,6 +199,7 @@ private slots:
     void exportSkipsClipsWhoseVideoIsGone();
     void exportBlocksOpeningVideos();
     void exportClipCanReplaceSourceFile();
+    void exportOverASourceStartsOverFromTheSavedFile();
     void exportZeroLengthClipFails();
     void exportRefusesRewrittenPathOverExistingFile();
     void exportStartFailureClearsBusy();
@@ -311,6 +313,20 @@ void BackendTests::pickerSelectionLoadsVideo() {
     QCOMPARE(backend.source(), videoUrl());
     QVERIFY(backend.timeline()->duration() > 0);
     waitForBackgroundWork(backend);
+}
+
+void BackendTests::loadRefusesAnythingButAbsoluteLocalPaths() {
+    ThumbProvider provider;
+    auto *picker = new FakeFilePicker;
+    Backend backend(&provider, picker);
+    QSignalSpy errorSpy(&backend, &Backend::loadError);
+
+    // ffprobe would take these as an option and a network address.
+    QVERIFY(!backend.load(QUrl(QStringLiteral("file:-report"))));
+    QVERIFY(!backend.load(QUrl(QStringLiteral("file:http://example.com/a.mp4"))));
+    QVERIFY(!backend.load(QUrl(QStringLiteral("https://example.com/a.mp4"))));
+    QCOMPARE(errorSpy.count(), 3);
+    QVERIFY(backend.source().isEmpty());
 }
 
 void BackendTests::addingAVideoInsertsItAfterThePlayheadsClip() {
@@ -665,6 +681,37 @@ void BackendTests::exportClipCanReplaceSourceFile() {
     QVERIFY2(formatName(sourcePath).contains(QStringLiteral("mp4")),
              qPrintable(formatName(sourcePath)));
     QVERIFY(!QFileInfo::exists(sourcePath + QStringLiteral(".omacut-part.mp4")));
+}
+
+void BackendTests::exportOverASourceStartsOverFromTheSavedFile() {
+    const QString sourcePath = makeVideo(QStringLiteral("overwritten.mp4"), 3.0, true);
+    QVERIFY(!sourcePath.isEmpty());
+
+    ThumbProvider provider;
+    auto *picker = new FakeFilePicker;
+    Backend backend(&provider, picker);
+    QSignalSpy doneSpy(&backend, &Backend::exportDone);
+    QSignalSpy failedSpy(&backend, &Backend::exportFailed);
+
+    QVERIFY(backend.load(QUrl::fromLocalFile(sourcePath)));
+    waitForBackgroundWork(backend);
+    Timeline *timeline = backend.timeline();
+    timeline->split(1.0);
+    timeline->split(2.0);
+    timeline->removeClip(2);
+    timeline->removeClip(0);
+
+    backend.exportClips(QUrl::fromLocalFile(sourcePath), timeline->clips());
+    QTRY_VERIFY_WITH_TIMEOUT(doneSpy.count() + failedSpy.count() > 0, 20000);
+    QCOMPARE(failedSpy.count(), 0);
+
+    // The old 1..2 clip is gone with the old file: the project is the saved
+    // second now, whole and already exported.
+    QCOMPARE(timeline->clips().size(), 1);
+    QCOMPARE(timeline->clips().first().in, 0.0);
+    QVERIFY2(qAbs(timeline->duration() - 1.0) < 0.15, qPrintable(QString::number(timeline->duration())));
+    QVERIFY(!timeline->unexported());
+    QCOMPARE(backend.videoList().size(), 1);
 }
 
 void BackendTests::exportZeroLengthClipFails() {

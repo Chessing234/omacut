@@ -216,6 +216,7 @@ private slots:
     void qmlZoomFocusesTheClip();
     void qmlDropOpensThenAddsVideos();
     void qmlDropTakesOnlyLocalFiles();
+    void qmlDropLandsAfterThePlayheadsClip();
     void qmlQuitConfirmsUnexportedEdit();
     void timelineSplitsTrimsAndJoins();
     void timelineUndoesAGestureAsOneStep();
@@ -1454,6 +1455,32 @@ void BackendTests::qmlDropOpensThenAddsVideos() {
     QVERIFY(!dropUrls(window, {QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("missing.mp4")))}));
     QCOMPARE(errors.count(), 1);
     QCOMPARE(timeline->clips().size(), 2);
+}
+
+void BackendTests::qmlDropLandsAfterThePlayheadsClip() {
+    const QString second = makeVideo(QStringLiteral("drop-mid-2.mp4"), 2.0, false);
+    const QString third = makeVideo(QStringLiteral("drop-mid-3.mp4"), 3.0, false);
+    QVERIFY(!second.isEmpty() && !third.isEmpty());
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    QVERIFY(backend.load(videoUrl()));
+    Timeline *timeline = backend.timeline();
+    timeline->split(0.5);
+    QmlHarness harness(backend);
+    auto *window = harness.window();
+    QVERIFY(window);
+    QTest::qWait(100);
+
+    // In the first of two clips: the drop goes between them, in order, past
+    // a file that won't open.
+    harness.editBar()->setProperty("playheadSec", 0.25);
+    QSignalSpy errors(&backend, &Backend::loadError);
+    QVERIFY(dropUrls(window, {QUrl::fromLocalFile(second),
+                              QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("missing.mp4"))),
+                              QUrl::fromLocalFile(third)}));
+    QCOMPARE(errors.count(), 1);
+    QCOMPARE(timeline->clips(), (edit::Clips{{0, 0.0, 0.5}, {1, 0.0, 2.0}, {2, 0.0, 3.0}, {0, 0.5, 1.0}}));
+    QVERIFY(!dropUrls(window, {QUrl(QStringLiteral("file:////host/share/a.mp4"))}));
 }
 
 void BackendTests::qmlDropTakesOnlyLocalFiles() {

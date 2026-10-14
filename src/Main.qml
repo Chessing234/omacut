@@ -57,12 +57,13 @@ ApplicationWindow {
     // Dropped videos open into an empty window, and otherwise join the edit
     // after the clip under the playhead, in the order dropped, the way the +
     // button adds one. Adding is undoable, so a stray drop costs nothing.
+    // A file that won't open is skipped, with its error, and the rest go on.
     function dropVideos(urls) {
         var t = editBar.playheadSec, added = 0;
         for (var i = 0; i < urls.length; ++i) {
             var at = win.hasVideo ? timeline.clipAt(t) + 1 : 0;
             if (!backend.addVideo(urls[i], t))
-                break;
+                continue;
             ++added;
             t = timeline.clipStart(at);
         }
@@ -789,13 +790,15 @@ ApplicationWindow {
         z: 5
         enabled: !win.quitConfirmVisible && !win.helpVisible && !backend.busy
         // Only local files: "file:-report" or "file:http://..." would reach
-        // ffprobe as an option or an address.
+        // ffprobe as an option or an address, and "file:////host/..." is a
+        // network share.
         onEntered: (drag) => {
             drag.accepted = drag.hasUrls && drag.urls.length > 0
-                && drag.urls.every((url) => url.toString().indexOf("file:///") === 0);
+                && drag.urls.every((url) => /^file:\/\/\/(?!\/)/.test(url.toString()));
         }
         onDropped: (drop) => {
             player.pause();
+            player.pendingPlay = false;
             if (win.dropVideos(drop.urls))
                 drop.accept(Qt.CopyAction);
         }

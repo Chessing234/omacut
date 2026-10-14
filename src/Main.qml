@@ -1,4 +1,5 @@
 import QtQuick
+import QtQml
 import QtQuick.Controls
 import QtQuick.Controls.Material
 import QtQuick.Layouts
@@ -152,6 +153,20 @@ ApplicationWindow {
     // The playback and editing shortcuts go quiet while the quit confirmation is
     // up — a disabled Shortcut also stops swallowing its key, which lets the
     // dialog's own keyboard navigation receive the arrows, Space and Enter.
+    // 0-9 jump to 0%-90% of the whole edit.
+    Instantiator {
+        model: 10
+        delegate: Shortcut {
+            required property int index
+            sequence: index.toString()
+            context: Qt.ApplicationShortcut
+            enabled: win.editing
+            // Held down, repeats would keep seeking to the same spot.
+            autoRepeat: false
+            onActivated: seekTo(timeline.duration * index / 10)
+        }
+    }
+
     Shortcut {
         sequence: "Space"
         context: Qt.ApplicationShortcut
@@ -852,6 +867,7 @@ ApplicationWindow {
                 Repeater {
                     model: [
                         { keys: "Space", action: "Play / pause" },
+                        { keys: "0–9", action: "Jump to 0%–90% of the edit" },
                         { keys: "← / →", action: "Move playhead 1s" },
                         { keys: "Shift ← / →", action: "Move playhead 5s" },
                         { keys: "Alt ← / →", action: "Move playhead 0.2s" },

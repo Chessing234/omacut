@@ -455,8 +455,6 @@ ApplicationWindow {
             if (pendingMs >= 0 && loadStarted
                     && (mediaStatus === MediaPlayer.LoadedMedia || mediaStatus === MediaPlayer.BufferedMedia))
                 Qt.callLater(takePending);
-            if (mediaStatus === MediaPlayer.EndOfMedia)
-                Qt.callLater(finishClip);
         }
         function takePending() {
             if (pendingMs < 0)
@@ -469,21 +467,6 @@ ApplicationWindow {
             } else {
                 startPriming(ms);
             }
-        }
-        function finishClip() {
-            if (priming) {
-                finishPriming();
-                return;
-            }
-            if (pendingMs >= 0 || clip < 0 || clip >= timeline.clips.length)
-                return;
-            if (clip + 1 < timeline.clips.length) {
-                show(clip + 1, timeline.clips[clip + 1].in, true);
-                return;
-            }
-            pause();
-            if (!editBar.interacting)
-                editBar.playheadSec = timeline.duration;
         }
         onPositionChanged: {
             if (priming) {

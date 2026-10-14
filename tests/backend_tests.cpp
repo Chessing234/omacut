@@ -218,7 +218,6 @@ private slots:
     void qmlKeysMoveAndAddClips();
     void qmlZoomFocusesTheClip();
     void qmlPressingHandleScrubsItsFrame();
-    void qmlEndOfMediaAdvancesOrFinishesPlayback();
     void formatTimeShowsHoursFromSixtyMinutes();
     void qmlDropOpensThenAddsVideos();
     void qmlDropTakesOnlyLocalFiles();
@@ -1165,42 +1164,6 @@ void BackendTests::qmlPressingHandleScrubsItsFrame() {
     QCOMPARE(scrubClipSpy.last().at(0).toInt(), 0);
     QCOMPARE(scrubClipSpy.last().at(1).toDouble(), 15.0);
     QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, rightHandle);
-}
-
-void BackendTests::qmlEndOfMediaAdvancesOrFinishesPlayback() {
-    ShortcutBackend backend(placeholderUrl(m_dir), 10.0);
-    QmlHarness harness(backend);
-    QQuickWindow *window = showEditor(harness, backend);
-    QVERIFY2(window, qPrintable(mainQmlPath()));
-    QQuickItem *editBar = harness.editBar();
-    QVERIFY(editBar);
-
-    backend.addVideo(5.0, 0.0);
-    QCOMPARE(backend.timeline.clips(), (edit::Clips{{0, 0.0, 10.0}, {1, 0.0, 5.0}}));
-
-    QObject *player = nullptr;
-    const auto objects = window->findChildren<QObject *>();
-    for (QObject *child : objects) {
-        if (child->property("clip").isValid() && child->property("pendingMs").isValid()) {
-            player = child;
-            break;
-        }
-    }
-    QVERIFY(player);
-
-    // If a source reaches EndOfMedia before position hits c.out - 0.03,
-    // finishClip advances to the next clip instead of stalling mid-sequence.
-    player->setProperty("clip", 0);
-    player->setProperty("pendingMs", -1);
-    player->setProperty("priming", false);
-    QVERIFY(QMetaObject::invokeMethod(player, "finishClip"));
-    QCOMPARE(player->property("clip").toInt(), 1);
-
-    // On the last clip, EndOfMedia parks the playhead at the end of the edit.
-    player->setProperty("pendingMs", -1);
-    player->setProperty("priming", false);
-    QVERIFY(QMetaObject::invokeMethod(player, "finishClip"));
-    QCOMPARE(editBar->property("playheadSec").toDouble(), 15.0);
 }
 
 void BackendTests::formatTimeShowsHoursFromSixtyMinutes() {

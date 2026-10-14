@@ -21,10 +21,12 @@ Item {
     // Frozen at zoom time, so the view doesn't shift under an edit.
     property real viewStartSec: 0
     property real viewEndSec: 0
-    onDurationSecChanged: {
-        if (zoomed && !trimming && durationSec <= viewStartSec)
-            zoomed = false
+    // An edit that ends before the zoomed view would leave the bar empty, so
+    // it zooms back out. Mid-trim the length changes live; that waits for the drop.
+    function unzoomIfPast() {
+        if (zoomed && durationSec <= viewStartSec) zoomed = false
     }
+    onDurationSecChanged: if (!trimming) unzoomIfPast()
     // Something is being dragged, so playback must not move the playhead.
     readonly property bool interacting: area.mode !== 0
     readonly property bool trimming: area.mode === 1
@@ -369,6 +371,7 @@ Item {
                 activeTime = leftEdge ? root.clips[clipIndex].in : root.clips[clipIndex].out
                 mode = 1
                 root.timeline.beginGesture()
+                // Show the edge's frame from the press, not only once dropped.
                 root.scrubClip(clipIndex, activeTime)
             } else {
                 mode = 2; pressX = mouse.x
@@ -385,8 +388,7 @@ Item {
                 // handle keeps it a hair inside, on this clip's last frame.
                 root.playheadSec = root.timeline.clipStart(clipIndex) + activeTime - root.clips[clipIndex].in
                     - (leftEdge ? 0 : 0.001)
-                if (root.zoomed && root.durationSec <= root.viewStartSec)
-                    root.zoomed = false
+                root.unzoomIfPast()
             }
             if (mode === 3 && onRemove(mouseX, mouseY)) root.timeline.removeClip(clipHovered)
             if (mode === 4) {
@@ -400,7 +402,7 @@ Item {
         }
         onCanceled: {
             hold.stop()
-            if (mode === 1) root.timeline.endGesture()
+            if (mode === 1) { root.timeline.endGesture(); root.unzoomIfPast() }
             mode = 0; clipIndex = -1
         }
         onDoubleClicked: mouse => {

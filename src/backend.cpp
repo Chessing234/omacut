@@ -179,6 +179,11 @@ bool Backend::probeVideo(const QUrl &url, Video *video) {
 }
 
 bool Backend::load(const QUrl &url) {
+    // A running export marks its clips exported when it finishes, which
+    // must not land on a different set of videos.
+    if (m_busy)
+        return false;
+
     Video video;
     if (!probeVideo(url, &video))
         return false;
@@ -191,6 +196,8 @@ bool Backend::load(const QUrl &url) {
 }
 
 bool Backend::addVideo(const QUrl &url, double t) {
+    if (m_busy)
+        return false;
     if (m_videos.isEmpty())
         return load(url);
 
@@ -247,9 +254,13 @@ void Backend::exportClips(const QUrl &dst, const edit::Clips &clips, int scaleHe
         return;
 
     QList<ffmpeg::Segment> segments;
+    // The first clip that still has its video sets the frame.
+    int frameSource = -1;
     for (const edit::Clip &clip : edit::merged(clips)) {
         if (clip.source < 0 || clip.source >= m_videos.size())
             continue;
+        if (frameSource < 0)
+            frameSource = clip.source;
         const ffmpeg::VideoInfo &info = m_videos[clip.source].info;
         segments.append({info.path, clip.in, clip.out, info.audio});
     }
@@ -283,7 +294,7 @@ void Backend::exportClips(const QUrl &dst, const edit::Clips &clips, int scaleHe
     // success, so failed/cancelled exports preserve any existing file.
     const QString tmpPath = outPath + QStringLiteral(".omacut-part.mp4");
     QFile::remove(tmpPath);
-    const ffmpeg::VideoInfo &frame = m_videos[clips.first().source].info;
+    const ffmpeg::VideoInfo &frame = m_videos[frameSource].info;
     const QStringList args = ffmpeg::trimArgs(segments, tmpPath, frame.width, frame.height, scaleHeight);
 
     auto *proc = new QProcess(this);

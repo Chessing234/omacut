@@ -42,10 +42,15 @@ ApplicationWindow {
         noticeText = text;
         noticeTimer.restart();
     }
+    // Not while exporting: the export would mark the new edit as exported.
     function openVideo() {
+        if (backend.busy)
+            return;
         backend.openVideoDialog();
     }
     function addVideo() {
+        if (backend.busy)
+            return;
         player.pause();
         backend.addVideoDialog(editBar.playheadSec);
     }
@@ -297,14 +302,14 @@ ApplicationWindow {
     Shortcut {
         sequence: "Ctrl+O"
         context: Qt.ApplicationShortcut
-        enabled: !win.quitConfirmVisible
+        enabled: !win.quitConfirmVisible && !backend.busy
         onActivated: openVideo()
     }
 
     Shortcut {
         sequence: "Ctrl+Shift+O"
         context: Qt.ApplicationShortcut
-        enabled: win.editing
+        enabled: win.editing && !backend.busy
         onActivated: addVideo()
     }
 
@@ -373,6 +378,18 @@ ApplicationWindow {
             position = ms;
             if (andPlay)
                 play();
+        }
+
+        // Moves a load still in progress to sourceTime in clip index, keeping
+        // whether it plays once loaded.
+        function retarget(index, sourceTime) {
+            var url = backend.videos[timeline.clips[index].source].url;
+            if (source.toString() !== url.toString()) {
+                show(index, sourceTime, pendingPlay);
+                return;
+            }
+            clip = index;
+            pendingMs = Math.round(sourceTime * 1000);
         }
 
         function startPriming(ms) {
@@ -456,11 +473,17 @@ ApplicationWindow {
         }
     }
     function resync() {
-        if (!hasVideo || timeline.duration <= 0 || editBar.interacting || player.pendingMs >= 0)
+        if (!hasVideo || timeline.duration <= 0 || editBar.interacting)
             return;
         var t = Math.min(editBar.playheadSec, timeline.duration);
         var i = timeline.clipAt(t), clip = timeline.clips[i];
         var sourceTime = clip.in + t - clip.start;
+        // Edited while a video loads: aim the wait at the playhead's clip now,
+        // not the one it was started for.
+        if (player.pendingMs >= 0) {
+            player.retarget(i, sourceTime);
+            return;
+        }
         // Still playing the right stretch, e.g. after a split: no need to seek.
         if (playing() && backend.videos[clip.source].url.toString() === player.source.toString()
                 && Math.abs(sourceTime - player.position / 1000) < 0.1) {
@@ -699,7 +722,7 @@ ApplicationWindow {
                 Layout.preferredHeight: 44
                 iconName: "plus"
                 tipText: "Add a video"
-                enabled: timeline.duration > 0
+                enabled: timeline.duration > 0 && !backend.busy
                 onClicked: addVideo()
             }
 

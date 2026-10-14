@@ -157,7 +157,9 @@ Item {
                             sourceSize.height: root.thumbHeight
                             fillMode: Image.PreserveAspectCrop
                             asynchronous: true
-                            source: "image://thumbs/" + backend.videos[clipItem.range.source].thumbKey + "/" + Math.round(time * 1000)
+                            // The first frame's slot can start before the clip
+                            // does; show the clip's own first frame, not cut footage.
+                            source: "image://thumbs/" + backend.videos[clipItem.range.source].thumbKey + "/" + Math.round(Math.max(time, clipItem.range.in) * 1000)
                         }
                     }
                 }

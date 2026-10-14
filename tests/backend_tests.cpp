@@ -195,6 +195,8 @@ private slots:
     void exportClipWritesMp4();
     void exportKeepsOnlyTheClipsFromTheDialog();
     void exportJoinsDifferentVideos();
+    void exportSkipsClipsWhoseVideoIsGone();
+    void exportBlocksOpeningVideos();
     void exportClipCanReplaceSourceFile();
     void exportZeroLengthClipFails();
     void exportRefusesRewrittenPathOverExistingFile();
@@ -518,6 +520,47 @@ QString BackendTests::makeVideo(const QString &name, double duration, bool audio
     if (!proc.waitForFinished(10000) || proc.exitStatus() != QProcess::NormalExit || proc.exitCode() != 0)
         return {};
     return path;
+}
+
+void BackendTests::exportSkipsClipsWhoseVideoIsGone() {
+    ThumbProvider provider;
+    auto *picker = new FakeFilePicker;
+    Backend backend(&provider, picker);
+    QSignalSpy doneSpy(&backend, &Backend::exportDone);
+    QSignalSpy failedSpy(&backend, &Backend::exportFailed);
+
+    QVERIFY(backend.load(videoUrl()));
+    waitForBackgroundWork(backend);
+
+    // Clips from a dialog opened on a project with more videos than this one.
+    const QString outPath = m_dir.filePath(QStringLiteral("gone-first.mp4"));
+    backend.exportClips(QUrl::fromLocalFile(outPath), {{3, 0.0, 1.0}, {0, 0.0, 1.0}});
+    QTRY_VERIFY_WITH_TIMEOUT(doneSpy.count() + failedSpy.count() > 0, 20000);
+    QCOMPARE(failedSpy.count(), 0);
+    QVERIFY(ffmpeg::probe(outPath).ok);
+}
+
+void BackendTests::exportBlocksOpeningVideos() {
+    ThumbProvider provider;
+    auto *picker = new FakeFilePicker;
+    Backend backend(&provider, picker);
+    QSignalSpy doneSpy(&backend, &Backend::exportDone);
+    QSignalSpy failedSpy(&backend, &Backend::exportFailed);
+
+    QVERIFY(backend.load(videoUrl()));
+    waitForBackgroundWork(backend);
+    backend.exportClips(QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("blocking.mp4"))), wholeVideo(1.0));
+    QVERIFY(backend.busy());
+
+    // The finished export marks its clips exported, so the videos can't change under it.
+    QVERIFY(!backend.load(videoUrl()));
+    QVERIFY(!backend.addVideo(videoUrl(), 0.0));
+    emit picker->openSelected(videoUrl());
+    QCOMPARE(backend.videoList().size(), 1);
+
+    QTRY_VERIFY_WITH_TIMEOUT(doneSpy.count() + failedSpy.count() > 0, 20000);
+    QCOMPARE(failedSpy.count(), 0);
+    QVERIFY(backend.addVideo(videoUrl(), 0.0));
 }
 
 void BackendTests::exportKeepsOnlyTheClipsFromTheDialog() {

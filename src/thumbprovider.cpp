@@ -10,8 +10,9 @@
 
 namespace {
 constexpr int kDefaultHeight = 90;
-// Enough frames for a long zoomed filmstrip, at roughly 40 KB each.
-constexpr int kCacheFrames = 600;
+// Budget in KB of decoded pixels: a 140 px frame is about 140 KB, so a few
+// hundred frames, plenty for a long zoomed filmstrip.
+constexpr int kCacheKB = 48 * 1024;
 
 class ThumbResponse : public QQuickImageResponse, public QRunnable {
 public:
@@ -64,7 +65,7 @@ private:
 };
 }  // namespace
 
-ThumbProvider::ThumbProvider() : m_cache(kCacheFrames) {
+ThumbProvider::ThumbProvider() : m_cache(kCacheKB) {
     // Each job is an ffmpeg process; a few at a time keeps the machine responsive.
     m_pool.setMaxThreadCount(3);
 }
@@ -88,7 +89,7 @@ QImage ThumbProvider::cached(const QString &id) const {
 
 void ThumbProvider::store(const QString &id, const QImage &image) {
     QMutexLocker lock(&m_mutex);
-    m_cache.insert(id, new QImage(image));
+    m_cache.insert(id, new QImage(image), qMax<qsizetype>(1, image.sizeInBytes() / 1024));
 }
 
 QQuickImageResponse *ThumbProvider::requestImageResponse(const QString &id, const QSize &requestedSize) {

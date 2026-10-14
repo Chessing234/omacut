@@ -60,8 +60,10 @@ public:
 
     // Suggested "<name>_trimmed.mp4" target next to the source.
     Q_INVOKABLE QUrl suggestedExportUrl() const;
-    // PNG of the frame under t (seconds along the edit), next to that clip's video.
-    Q_INVOKABLE QString saveFrame(double t);
+    // Saves the frame under t (seconds along the edit) as a PNG next to that
+    // clip's video, in the background. One at a time; frameSaved or
+    // frameFailed says how it went.
+    Q_INVOKABLE void saveFrame(double t);
 
     // Write the clips to dst. A non-zero scaleHeight downscales the shorter
     // side to that size.
@@ -79,6 +81,8 @@ signals:
     void themeAccentChanged();
     void exportDone(const QString &path);
     void exportFailed(const QString &message);
+    void frameSaved(const QString &path);
+    void frameFailed(const QString &message);
     void loadError(const QString &message);
 
 private:
@@ -109,6 +113,7 @@ private:
     double m_addAt = 0.0;
     edit::Clips m_exportDialogClips;
     bool m_busy = false;
+    bool m_savingFrame = false;
     QString m_status;
     QString m_themeAccent;
     QFileSystemWatcher m_themeWatcher;

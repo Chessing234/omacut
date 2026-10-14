@@ -257,33 +257,50 @@ void Backend::exportDialog() {
     m_filePicker->exportVideo(suggestedExportUrl(), exportHeights(frame.width, frame.height));
 }
 
-QString Backend::saveFrame(double t) {
-    if (m_videos.isEmpty() || m_timeline.duration() <= 0)
-        return {};
+void Backend::saveFrame(double t) {
+    if (m_savingFrame || m_videos.isEmpty() || m_timeline.duration() <= 0)
+        return;
     t = qBound(0.0, t, m_timeline.duration());
     const int index = m_timeline.clipAt(t);
     const edit::Clips clips = m_timeline.clips();
     if (index < 0 || index >= clips.size())
-        return {};
+        return;
     const edit::Clip clip = clips.at(index);
     if (clip.source < 0 || clip.source >= m_videos.size())
-        return {};
+        return;
     const double sourceTime = clip.in + (t - m_timeline.clipStart(index));
-    const QFileInfo source(m_videos.at(clip.source).url.toLocalFile());
-    QString pngPath = source.absolutePath() + QLatin1Char('/') + source.completeBaseName()
-                      + QStringLiteral("-frame.png");
-    for (int n = 2; QFileInfo::exists(pngPath); ++n) {
-        pngPath = source.absolutePath() + QLatin1Char('/') + source.completeBaseName()
-                  + QStringLiteral("-frame-%1.png").arg(n);
+    const QFileInfo source(m_videos.at(clip.source).info.path);
+    const QString stem = source.absolutePath() + QLatin1Char('/') + source.completeBaseName();
+    QString pngPath = stem + QStringLiteral("-frame.png");
+    for (int n = 2; QFileInfo::exists(pngPath); ++n)
+        pngPath = stem + QStringLiteral("-frame-%1.png").arg(n);
+
+    const QString ffmpegBin = ffmpeg::toolPath("ffmpeg");
+    if (ffmpegBin.isEmpty()) {
+        emit frameFailed(QStringLiteral("ffmpeg is not installed."));
+        return;
     }
-    const QString error = ffmpeg::writeFrame(source.absoluteFilePath(), sourceTime, pngPath,
-                                             m_videos.at(clip.source).info.height);
-    if (!error.isEmpty()) {
-        setStatus(error);
-        return {};
-    }
-    setStatus(QFileInfo(pngPath).fileName());
-    return pngPath;
+    // In the background: a 4K frame takes long enough to stall the window.
+    m_savingFrame = true;
+    auto *proc = new QProcess(this);
+    connect(proc, &QProcess::finished, this, [this, proc, pngPath](int code, QProcess::ExitStatus status) {
+        m_savingFrame = false;
+        const QString err = QString::fromUtf8(proc->readAllStandardError()).trimmed();
+        proc->deleteLater();
+        if (status != QProcess::NormalExit || code != 0 || !QFileInfo::exists(pngPath)) {
+            emit frameFailed(err.isEmpty() ? QStringLiteral("ffmpeg failed.") : err);
+            return;
+        }
+        emit frameSaved(pngPath);
+    });
+    connect(proc, &QProcess::errorOccurred, this, [this, proc](QProcess::ProcessError error) {
+        if (error != QProcess::FailedToStart)
+            return;
+        m_savingFrame = false;
+        proc->deleteLater();
+        emit frameFailed(proc->errorString());
+    });
+    proc->start(ffmpegBin, ffmpeg::frameArgs(source.absoluteFilePath(), sourceTime, pngPath));
 }
 
 QList<int> Backend::exportHeights(int width, int height) {

@@ -200,6 +200,7 @@ private slots:
     void suggestedExportUrlAlwaysUsesMp4();
     void exportClipWritesMp4();
     void saveFrameWritesPngBesideTheSource();
+    void saveFrameSquaresStretchedPixels();
     void exportKeepsOnlyTheClipsFromTheDialog();
     void exportJoinsDifferentVideos();
     void exportSkipsClipsWhoseVideoIsGone();
@@ -494,17 +495,52 @@ void BackendTests::suggestedExportUrlAlwaysUsesMp4() {
 void BackendTests::saveFrameWritesPngBesideTheSource() {
     ThumbProvider provider;
     Backend backend(&provider, new FakeFilePicker);
+    QSignalSpy savedSpy(&backend, &Backend::frameSaved);
+    QSignalSpy failedSpy(&backend, &Backend::frameFailed);
     QVERIFY(backend.load(videoUrl()));
-    const QString png = backend.saveFrame(0.0);
-    QVERIFY2(!png.isEmpty(), qPrintable(backend.status()));
-    QImage frame(png);
-    QVERIFY(!frame.isNull());
-    QCOMPARE(frame.size(), QSize(32, 32));
+
+    // Written in the background, a lossless full-size PNG.
+    backend.saveFrame(0.0);
+    QTRY_VERIFY_WITH_TIMEOUT(savedSpy.count() + failedSpy.count() > 0, 10000);
+    QVERIFY2(failedSpy.isEmpty(), qPrintable(failedSpy.value(0).value(0).toString()));
+    const QString png = savedSpy.first().at(0).toString();
     QVERIFY(png.endsWith(QStringLiteral("clip-frame.png")));
-    // A second save does not overwrite the first.
-    const QString again = backend.saveFrame(0.0);
-    QVERIFY(again.endsWith(QStringLiteral("clip-frame-2.png")));
-    QVERIFY(QFileInfo(png).size() > 0);
+    QCOMPARE(formatName(png), QStringLiteral("png_pipe"));
+    QImage frame(png);
+    QCOMPARE(frame.size(), QSize(32, 32));
+    // The status line keeps showing the playhead.
+    QVERIFY(backend.status().isEmpty());
+
+    // A second save gets its own name, and a press while one is running is ignored.
+    backend.saveFrame(0.0);
+    backend.saveFrame(0.0);
+    QTRY_VERIFY_WITH_TIMEOUT(savedSpy.count() + failedSpy.count() > 1, 10000);
+    QTest::qWait(300);
+    QCOMPARE(savedSpy.count(), 2);
+    QVERIFY(savedSpy.at(1).at(0).toString().endsWith(QStringLiteral("clip-frame-2.png")));
+    QVERIFY(!QFileInfo::exists(m_dir.filePath(QStringLiteral("clip-frame-3.png"))));
+}
+
+void BackendTests::saveFrameSquaresStretchedPixels() {
+    // 40x30 stored, shown 4:3 wider: the PNG is the shape it plays at.
+    const QString path = m_dir.filePath(QStringLiteral("stretched.mp4"));
+    QProcess proc;
+    proc.start(QStandardPaths::findExecutable(QStringLiteral("ffmpeg")), {
+        QStringLiteral("-loglevel"), QStringLiteral("error"),
+        QStringLiteral("-f"), QStringLiteral("lavfi"),
+        QStringLiteral("-i"), QStringLiteral("testsrc=size=40x30:rate=1:duration=1"),
+        QStringLiteral("-vf"), QStringLiteral("setsar=4/3"),
+        QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"), QStringLiteral("-y"), path,
+    });
+    QVERIFY(proc.waitForFinished(10000) && proc.exitCode() == 0);
+
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    QSignalSpy savedSpy(&backend, &Backend::frameSaved);
+    QVERIFY(backend.load(QUrl::fromLocalFile(path)));
+    backend.saveFrame(0.0);
+    QTRY_COMPARE_WITH_TIMEOUT(savedSpy.count(), 1, 10000);
+    QCOMPARE(QImage(savedSpy.first().at(0).toString()).size(), QSize(53, 30));
 }
 
 void BackendTests::exportClipWritesMp4() {

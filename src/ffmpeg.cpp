@@ -1,7 +1,5 @@
 #include "ffmpeg.h"
 
-#include <QFileInfo>
-#include <QImage>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -143,13 +141,16 @@ QImage thumbnail(const QString &path, double time, int height,
     return img;
 }
 
-QString writeFrame(const QString &path, double time, const QString &pngPath, int height) {
-    const QImage frame = thumbnail(path, time, qMax(height, 2));
-    if (frame.isNull())
-        return QStringLiteral("Could not save the frame.");
-    if (!frame.save(pngPath, "PNG"))
-        return QStringLiteral("Could not write %1.").arg(QFileInfo(pngPath).fileName());
-    return {};
+QStringList frameArgs(const QString &path, double time, const QString &pngPath) {
+    return {
+        "-loglevel", "error",
+        "-n",
+        "-ss", QString::number(qMax(time, 0.0), 'f', 3),
+        "-i", path,
+        "-frames:v", "1",
+        "-vf", "scale=trunc(iw*sar):ih,setsar=1",
+        pngPath,
+    };
 }
 
 QStringList trimArgs(const QList<Segment> &segments, const QString &dst,

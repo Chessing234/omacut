@@ -34,6 +34,7 @@ Handles catch on neighbouring clip edges and the playhead.
 - *Alt+Space*: Move the end of the clip under the playhead to the playhead.
 - *Ctrl+Z / Ctrl+Shift+Z*: Undo / redo.
 - *Z*: Zoom to the clip under the playhead for fine tuning (Z again zooms back out).
+- *F*: Save the frame under the playhead as a PNG next to its video.
 - *Ctrl+O*: Open a new file to edit.
 - *Ctrl+Shift+O*: Add a video after the clip under the playhead.
 - *Ctrl+S*: Export the current edit.

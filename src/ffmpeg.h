@@ -30,8 +30,9 @@ VideoInfo probe(const QString &path);
 QImage thumbnail(const QString &path, double time, int height = 90,
                  const std::atomic<bool> *cancel = nullptr);
 
-// Write one full-size frame at `time` seconds to `pngPath`. Empty on success.
-QString writeFrame(const QString &path, double time, const QString &pngPath, int height);
+// ffmpeg arguments that write the frame at `time` seconds to `pngPath`, full
+// size, upright and with square pixels. Refuses to overwrite.
+QStringList frameArgs(const QString &path, double time, const QString &pngPath);
 
 // A stretch [start, end] seconds of one video, as exported.
 struct Segment {

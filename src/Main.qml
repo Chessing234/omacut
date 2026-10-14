@@ -1077,6 +1077,12 @@ ApplicationWindow {
         function onExportFailed(message) {
             win.showNotice("Export failed: " + message);
         }
+        function onFrameSaved(path) {
+            win.showNotice("Saved " + path);
+        }
+        function onFrameFailed(message) {
+            win.showNotice("Could not save the frame: " + message);
+        }
         function onLoadError(message) {
             win.showNotice("Cannot open video: " + message);
         }

@@ -30,13 +30,6 @@ ApplicationWindow {
     // Editing shortcuts go quiet while a dialog is up or a handle is dragged.
     readonly property bool editing: hasVideo && timeline.duration > 0 && !quitConfirmVisible && !editBar.interacting
 
-    // Keep preview audio attached to whichever output the system currently
-    // considers its default. MediaDevices updates defaultAudioOutput when the
-    // user switches between headphones, speakers, monitor audio, etc.
-    MediaDevices {
-        id: mediaDevices
-    }
-
     Material.theme: Material.Dark
     Material.accent: win.accent
     color: "#0e0e10"
@@ -504,7 +497,11 @@ ApplicationWindow {
     Component {
         id: audioOutputComponent
         AudioOutput {
-            device: mediaDevices.defaultAudioOutput
+            // Follows the system's default output as it changes, between
+            // headphones, speakers, monitor audio, etc. Created with the
+            // output, so nothing watches devices before a video is open.
+            property MediaDevices devices: MediaDevices {}
+            device: devices.defaultAudioOutput
             muted: player.priming
         }
     }

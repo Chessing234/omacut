@@ -497,6 +497,11 @@ ApplicationWindow {
     Component {
         id: audioOutputComponent
         AudioOutput {
+            // Follows the system's default output as it changes, between
+            // headphones, speakers, monitor audio, etc. Created with the
+            // output, so nothing watches devices before a video is open.
+            property MediaDevices devices: MediaDevices {}
+            device: devices.defaultAudioOutput
             muted: player.priming
         }
     }

@@ -310,6 +310,14 @@ ApplicationWindow {
     }
 
     Shortcut {
+        sequence: "F"
+        context: Qt.ApplicationShortcut
+        autoRepeat: false
+        enabled: win.editing && !backend.busy
+        onActivated: backend.saveFrame(editBar.playheadSec)
+    }
+
+    Shortcut {
         sequence: "Ctrl+Z"
         context: Qt.ApplicationShortcut
         enabled: win.editing && timeline.canUndo
@@ -934,6 +942,7 @@ ApplicationWindow {
                         { keys: "Alt Space", action: "Clip end to playhead" },
                         { keys: "Ctrl Z", action: "Undo (Ctrl Shift Z redo)" },
                         { keys: "Z", action: "Zoom to the clip" },
+                        { keys: "F", action: "Save the playhead frame as a PNG" },
                         { keys: "Ctrl O", action: "Open a video" },
                         { keys: "Ctrl Shift O", action: "Add a video after this clip" },
                         { keys: "Ctrl S", action: "Export" },

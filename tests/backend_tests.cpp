@@ -7,6 +7,7 @@
 #include <QMimeData>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QImage>
 #include <QFileInfo>
 #include <QProcess>
 #include <QQmlApplicationEngine>
@@ -198,6 +199,7 @@ private slots:
     void exportDialogDelegatesSuggestedUrl();
     void suggestedExportUrlAlwaysUsesMp4();
     void exportClipWritesMp4();
+    void saveFrameWritesPngBesideTheSource();
     void exportKeepsOnlyTheClipsFromTheDialog();
     void exportJoinsDifferentVideos();
     void exportSkipsClipsWhoseVideoIsGone();
@@ -487,6 +489,22 @@ void BackendTests::suggestedExportUrlAlwaysUsesMp4() {
 
     QCOMPARE(backend.suggestedExportUrl(),
              QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("renamed-source_trimmed.mp4"))));
+}
+
+void BackendTests::saveFrameWritesPngBesideTheSource() {
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    QVERIFY(backend.load(videoUrl()));
+    const QString png = backend.saveFrame(0.0);
+    QVERIFY2(!png.isEmpty(), qPrintable(backend.status()));
+    QImage frame(png);
+    QVERIFY(!frame.isNull());
+    QCOMPARE(frame.size(), QSize(32, 32));
+    QVERIFY(png.endsWith(QStringLiteral("clip-frame.png")));
+    // A second save does not overwrite the first.
+    const QString again = backend.saveFrame(0.0);
+    QVERIFY(again.endsWith(QStringLiteral("clip-frame-2.png")));
+    QVERIFY(QFileInfo(png).size() > 0);
 }
 
 void BackendTests::exportClipWritesMp4() {

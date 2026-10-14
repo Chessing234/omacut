@@ -257,6 +257,35 @@ void Backend::exportDialog() {
     m_filePicker->exportVideo(suggestedExportUrl(), exportHeights(frame.width, frame.height));
 }
 
+QString Backend::saveFrame(double t) {
+    if (m_videos.isEmpty() || m_timeline.duration() <= 0)
+        return {};
+    t = qBound(0.0, t, m_timeline.duration());
+    const int index = m_timeline.clipAt(t);
+    const edit::Clips clips = m_timeline.clips();
+    if (index < 0 || index >= clips.size())
+        return {};
+    const edit::Clip clip = clips.at(index);
+    if (clip.source < 0 || clip.source >= m_videos.size())
+        return {};
+    const double sourceTime = clip.in + (t - m_timeline.clipStart(index));
+    const QFileInfo source(m_videos.at(clip.source).url.toLocalFile());
+    QString pngPath = source.absolutePath() + QLatin1Char('/') + source.completeBaseName()
+                      + QStringLiteral("-frame.png");
+    for (int n = 2; QFileInfo::exists(pngPath); ++n) {
+        pngPath = source.absolutePath() + QLatin1Char('/') + source.completeBaseName()
+                  + QStringLiteral("-frame-%1.png").arg(n);
+    }
+    const QString error = ffmpeg::writeFrame(source.absoluteFilePath(), sourceTime, pngPath,
+                                             m_videos.at(clip.source).info.height);
+    if (!error.isEmpty()) {
+        setStatus(error);
+        return {};
+    }
+    setStatus(QFileInfo(pngPath).fileName());
+    return pngPath;
+}
+
 QList<int> Backend::exportHeights(int width, int height) {
     const int shortSide = qMin(width, height);
     QList<int> heights;

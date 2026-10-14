@@ -60,6 +60,8 @@ public:
 
     // Suggested "<name>_trimmed.mp4" target next to the source.
     Q_INVOKABLE QUrl suggestedExportUrl() const;
+    // PNG of the frame under t (seconds along the edit), next to that clip's video.
+    Q_INVOKABLE QString saveFrame(double t);
 
     // Write the clips to dst. A non-zero scaleHeight downscales the shorter
     // side to that size.

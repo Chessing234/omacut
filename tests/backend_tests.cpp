@@ -1162,8 +1162,15 @@ void BackendTests::qmlPressingHandleScrubsItsFrame() {
     QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, rightHandle);
     QCOMPARE(scrubClipSpy.count(), 2);
     QCOMPARE(scrubClipSpy.last().at(0).toInt(), 0);
-    QCOMPARE(scrubClipSpy.last().at(1).toDouble(), 15.0);
-    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, rightHandle);
+    QCOMPARE(scrubClipSpy.last().at(1).toDouble(), 14.999);
+
+    // Dragging it keeps showing the clip's last frame, not the moment past it.
+    QTest::mouseMove(window, rightHandle - QPoint(40, 0));
+    QTRY_VERIFY_WITH_TIMEOUT(scrubClipSpy.count() > 2, 3000);
+    const double out = backend.timeline.clips().first().out;
+    QVERIFY(out < 15.0);
+    QCOMPARE(scrubClipSpy.last().at(1).toDouble(), out - 0.001);
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, rightHandle - QPoint(40, 0));
 }
 
 void BackendTests::formatTimeShowsHoursFromSixtyMinutes() {

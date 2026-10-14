@@ -21,6 +21,10 @@ Item {
     // Frozen at zoom time, so the view doesn't shift under an edit.
     property real viewStartSec: 0
     property real viewEndSec: 0
+    onDurationSecChanged: {
+        if (zoomed && !trimming && durationSec <= viewStartSec)
+            zoomed = false
+    }
     // Something is being dragged, so playback must not move the playhead.
     readonly property bool interacting: area.mode !== 0
     readonly property bool trimming: area.mode === 1
@@ -365,6 +369,7 @@ Item {
                 activeTime = leftEdge ? root.clips[clipIndex].in : root.clips[clipIndex].out
                 mode = 1
                 root.timeline.beginGesture()
+                root.scrubClip(clipIndex, activeTime)
             } else {
                 mode = 2; pressX = mouse.x
                 seek(root.timeForX(mouse.x))
@@ -380,6 +385,8 @@ Item {
                 // handle keeps it a hair inside, on this clip's last frame.
                 root.playheadSec = root.timeline.clipStart(clipIndex) + activeTime - root.clips[clipIndex].in
                     - (leftEdge ? 0 : 0.001)
+                if (root.zoomed && root.durationSec <= root.viewStartSec)
+                    root.zoomed = false
             }
             if (mode === 3 && onRemove(mouseX, mouseY)) root.timeline.removeClip(clipHovered)
             if (mode === 4) {

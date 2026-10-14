@@ -20,7 +20,6 @@ ApplicationWindow {
     property var audioOutput: null
     property string noticeText: ""
     property bool helpVisible: false
-    property url pendingDropUrl: ""
     property bool quitConfirmVisible: false
     readonly property string statusText: noticeText !== "" ? noticeText : backend.status
 
@@ -29,7 +28,7 @@ ApplicationWindow {
     // first video is never dirty — that's just the source.
     readonly property bool unexported: hasVideo && timeline.unexported
     // Editing shortcuts go quiet while a dialog is up or a handle is dragged.
-    readonly property bool editing: hasVideo && timeline.duration > 0 && !quitConfirmVisible && !dropConfirm.visible && !editBar.interacting
+    readonly property bool editing: hasVideo && timeline.duration > 0 && !quitConfirmVisible && !editBar.interacting
 
     Material.theme: Material.Dark
     Material.accent: win.accent
@@ -49,19 +48,25 @@ ApplicationWindow {
             return;
         backend.openVideoDialog();
     }
-    function openDroppedVideo(url) {
-        if (unexported) {
-            pendingDropUrl = url;
-            dropConfirm.open();
-            return true;
-        }
-        return backend.load(url);
-    }
     function addVideo() {
         if (backend.busy)
             return;
         player.pause();
         backend.addVideoDialog(editBar.playheadSec);
+    }
+    // Dropped videos open into an empty window, and otherwise join the edit
+    // after the clip under the playhead, in the order dropped, the way the +
+    // button adds one. Adding is undoable, so a stray drop costs nothing.
+    function dropVideos(urls) {
+        var t = editBar.playheadSec, added = 0;
+        for (var i = 0; i < urls.length; ++i) {
+            var at = win.hasVideo ? timeline.clipAt(t) + 1 : 0;
+            if (!backend.addVideo(urls[i], t))
+                break;
+            ++added;
+            t = timeline.clipStart(at);
+        }
+        return added > 0;
     }
     function exportVideo() {
         if (!win.hasVideo || timeline.duration <= 0 || backend.busy)
@@ -164,7 +169,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "Space"
         context: Qt.ApplicationShortcut
-        enabled: win.hasVideo && !win.quitConfirmVisible && !dropConfirm.visible
+        enabled: win.hasVideo && !win.quitConfirmVisible
         onActivated: togglePlay()
     }
 
@@ -303,8 +308,6 @@ ApplicationWindow {
         context: Qt.ApplicationShortcut
         enabled: win.hasVideo && timeline.duration > 0 && !backend.busy
         onActivated: {
-            if (dropConfirm.visible)
-                return;
             win.quitConfirmVisible = false;
             exportVideo();
         }
@@ -313,7 +316,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "Ctrl+O"
         context: Qt.ApplicationShortcut
-        enabled: !win.quitConfirmVisible && !dropConfirm.visible && !backend.busy
+        enabled: !win.quitConfirmVisible && !backend.busy
         onActivated: openVideo()
     }
 
@@ -327,7 +330,6 @@ ApplicationWindow {
     Shortcut {
         sequence: "Q"
         context: Qt.ApplicationShortcut
-        enabled: !dropConfirm.visible
         onActivated: {
             if (!win.quitConfirmVisible)
                 requestQuit();
@@ -337,7 +339,6 @@ ApplicationWindow {
     Shortcut {
         sequence: "?"
         context: Qt.ApplicationShortcut
-        enabled: !dropConfirm.visible
         onActivated: {
             if (!win.quitConfirmVisible)
                 win.helpVisible = !win.helpVisible;
@@ -347,7 +348,6 @@ ApplicationWindow {
     Shortcut {
         sequence: "Escape"
         context: Qt.ApplicationShortcut
-        enabled: !dropConfirm.visible
         onActivated: {
             if (win.quitConfirmVisible)
                 win.quitConfirmVisible = false;
@@ -787,17 +787,16 @@ ApplicationWindow {
         objectName: "videoDropArea"
         anchors.fill: parent
         z: 5
-        enabled: !win.quitConfirmVisible && !win.helpVisible && !dropConfirm.visible
+        enabled: !win.quitConfirmVisible && !win.helpVisible && !backend.busy
+        // Only local files: "file:-report" or "file:http://..." would reach
+        // ffprobe as an option or an address.
         onEntered: (drag) => {
             drag.accepted = drag.hasUrls && drag.urls.length > 0
-                && drag.urls.every((url) => url.toString().toLowerCase().indexOf("file:") === 0);
+                && drag.urls.every((url) => url.toString().indexOf("file:///") === 0);
         }
         onDropped: (drop) => {
-            if (drop.urls.length !== 1) {
-                win.showNotice("Drop one video at a time.");
-                return;
-            }
-            if (win.openDroppedVideo(drop.urls[0]))
+            player.pause();
+            if (win.dropVideos(drop.urls))
                 drop.accept(Qt.CopyAction);
         }
         Rectangle {
@@ -810,30 +809,11 @@ ApplicationWindow {
             radius: 12
             Label {
                 anchors.centerIn: parent
-                text: "Drop a video to open it"
+                text: win.hasVideo ? "Drop to add to the edit" : "Drop a video to open it"
                 font.pixelSize: 20
                 color: win.accent
             }
         }
-    }
-
-    Dialog {
-        id: dropConfirm
-        objectName: "dropConfirm"
-        parent: Overlay.overlay
-        anchors.centerIn: parent
-        modal: true
-        title: "Open another video?"
-        standardButtons: Dialog.Open | Dialog.Cancel
-        Label {
-            text: "Your current edit has unexported changes.\nOpen the dropped video and discard those changes?"
-            wrapMode: Text.WordWrap
-        }
-        onAccepted: {
-            backend.load(win.pendingDropUrl);
-            win.pendingDropUrl = "";
-        }
-        onRejected: win.pendingDropUrl = ""
     }
 
     // --- subtle help toggle in the corner ---

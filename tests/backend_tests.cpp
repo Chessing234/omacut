@@ -214,10 +214,8 @@ private slots:
     void qmlBracketsJumpBetweenClipEdges();
     void qmlKeysMoveAndAddClips();
     void qmlZoomFocusesTheClip();
-    void qmlAcceptsNativeFileDrops();
-    void qmlDropProtectsUnexportedEdits();
-    void qmlDropConfirmationOwnsKeyboard_data();
-    void qmlDropConfirmationOwnsKeyboard();
+    void qmlDropOpensThenAddsVideos();
+    void qmlDropTakesOnlyLocalFiles();
     void qmlQuitConfirmsUnexportedEdit();
     void timelineSplitsTrimsAndJoins();
     void timelineUndoesAGestureAsOneStep();
@@ -1425,86 +1423,59 @@ static bool dropUrls(QQuickWindow *window, const QList<QUrl> &urls) {
     return accepted;
 }
 
-void BackendTests::qmlAcceptsNativeFileDrops() {
+void BackendTests::qmlDropOpensThenAddsVideos() {
+    const QString second = makeVideo(QStringLiteral("dropped #2 with spaces.mp4"), 2.0, false);
+    const QString third = makeVideo(QStringLiteral("dropped-3.mp4"), 3.0, false);
+    QVERIFY(!second.isEmpty() && !third.isEmpty());
     ThumbProvider provider;
     Backend backend(&provider, new FakeFilePicker);
-    QSignalSpy errors(&backend, &Backend::loadError);
     QmlHarness harness(backend);
     auto *window = harness.window();
     QVERIFY(window);
     QTest::qWait(100);
+    Timeline *timeline = backend.timeline();
+
+    // Into an empty window, a drop opens the video.
     QVERIFY(dropUrls(window, {videoUrl()}));
     QCOMPARE(backend.source(), videoUrl());
-    QVERIFY(dropUrls(window, {videoUrl()}));
-    QVERIFY(!dropUrls(window, {videoUrl(), videoUrl()}));
-    QCOMPARE(window->property("noticeText").toString(), QStringLiteral("Drop one video at a time."));
-    QVERIFY(!dropUrls(window, {QUrl(QStringLiteral("https://example.com/video.mp4"))}));
+    QCOMPARE(timeline->clips(), wholeVideo(1.0));
+
+    // After that, drops join the edit after the clip under the playhead, in
+    // order, and one undo takes each back out.
+    QVERIFY(dropUrls(window, {QUrl::fromLocalFile(second), QUrl::fromLocalFile(third)}));
+    QCOMPARE(backend.source(), videoUrl());
+    QCOMPARE(timeline->clips(), (edit::Clips{{0, 0.0, 1.0}, {1, 0.0, 2.0}, {2, 0.0, 3.0}}));
+    QVERIFY(timeline->unexported());
+    timeline->undo();
+    QCOMPARE(timeline->clips(), (edit::Clips{{0, 0.0, 1.0}, {1, 0.0, 2.0}}));
+
+    // A file that won't open adds nothing, and says so.
+    QSignalSpy errors(&backend, &Backend::loadError);
     QVERIFY(!dropUrls(window, {QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("missing.mp4")))}));
     QCOMPARE(errors.count(), 1);
-    QCOMPARE(backend.source(), videoUrl());
-    QVERIFY(!backend.timeline()->unexported());
+    QCOMPARE(timeline->clips().size(), 2);
 }
 
-void BackendTests::qmlDropProtectsUnexportedEdits() {
-    const QString other = makeVideo(QStringLiteral("dropped #2 with spaces.mp4"), 2.0, false);
-    QVERIFY(!other.isEmpty());
+void BackendTests::qmlDropTakesOnlyLocalFiles() {
     ThumbProvider provider;
     Backend backend(&provider, new FakeFilePicker);
-    QVERIFY(backend.load(videoUrl()));
-    backend.timeline()->trimTo(0.25, true);
-    const auto originalClips = backend.timeline()->clips();
     QmlHarness harness(backend);
     auto *window = harness.window();
     QVERIFY(window);
     QTest::qWait(100);
-    QVERIFY(dropUrls(window, {QUrl::fromLocalFile(other)}));
-    auto *confirm = window->findChild<QObject *>(QStringLiteral("dropConfirm"));
-    QVERIFY(confirm);
-    QVERIFY(confirm->property("visible").toBool());
-    QCOMPARE(backend.source(), videoUrl());
-    QCOMPARE(backend.timeline()->clips(), originalClips);
-    QVERIFY(QMetaObject::invokeMethod(confirm, "reject"));
-    QTRY_VERIFY(!confirm->property("visible").toBool());
-    QCOMPARE(backend.source(), videoUrl());
-    QVERIFY(dropUrls(window, {QUrl::fromLocalFile(other)}));
-    QVERIFY(QMetaObject::invokeMethod(confirm, "accept"));
-    QCOMPARE(backend.source(), QUrl::fromLocalFile(other));
-    QVERIFY(!backend.timeline()->unexported());
-}
 
-void BackendTests::qmlDropConfirmationOwnsKeyboard_data() {
-    QTest::addColumn<int>("key");
-    QTest::newRow("escape") << int(Qt::Key_Escape);
-    QTest::newRow("quit") << int(Qt::Key_Q);
-    QTest::newRow("help") << int(Qt::Key_Question);
-}
+    QVERIFY(!dropUrls(window, {QUrl(QStringLiteral("https://example.com/video.mp4"))}));
+    QVERIFY(!dropUrls(window, {QUrl(QStringLiteral("file:-report"))}));
+    QVERIFY(!dropUrls(window, {videoUrl(), QUrl(QStringLiteral("file:http://example.com/a.mp4"))}));
+    QVERIFY(backend.source().isEmpty());
 
-void BackendTests::qmlDropConfirmationOwnsKeyboard() {
-    QFETCH(int, key);
-    ThumbProvider provider;
-    Backend backend(&provider, new FakeFilePicker);
+    // Not while exporting: the export would mark the new edit as exported.
     QVERIFY(backend.load(videoUrl()));
-    backend.timeline()->trimTo(0.25, true);
-    const auto originalClips = backend.timeline()->clips();
-    QmlHarness harness(backend);
-    auto *window = harness.window();
-    QVERIFY(window);
-    window->requestActivate();
-    QTest::qWait(100);
-    QVERIFY(dropUrls(window, {videoUrl()}));
-    auto *confirm = window->findChild<QObject *>(QStringLiteral("dropConfirm"));
-    QVERIFY(confirm);
-    QVERIFY(confirm->property("visible").toBool());
-    QTest::keyClick(window, Qt::Key(key));
-    if (key == Qt::Key_Escape) {
-        QTRY_VERIFY(!confirm->property("visible").toBool());
-        QVERIFY(window->property("pendingDropUrl").toUrl().isEmpty());
-    } else {
-        QVERIFY(confirm->property("visible").toBool());
-    }
-    QVERIFY(!window->property("quitConfirmVisible").toBool());
-    QVERIFY(!window->property("helpVisible").toBool());
-    QCOMPARE(backend.timeline()->clips(), originalClips);
+    backend.exportClips(QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("drop-busy.mp4"))), wholeVideo(1.0));
+    QVERIFY(backend.busy());
+    QVERIFY(!dropUrls(window, {videoUrl()}));
+    QCOMPARE(backend.timeline()->clips(), wholeVideo(1.0));
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 20000);
 }
 
 QTEST_MAIN(BackendTests)

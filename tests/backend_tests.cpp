@@ -1436,8 +1436,9 @@ void BackendTests::qmlDropOpensThenAddsVideos() {
     QTest::qWait(100);
     Timeline *timeline = backend.timeline();
 
-    // Into an empty window, a drop opens the video.
-    QVERIFY(dropUrls(window, {videoUrl()}));
+    // Into an empty window, a drop opens the video, saying what it skipped.
+    QVERIFY(dropUrls(window, {QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("missing-first.mp4"))), videoUrl()}));
+    QCOMPARE(window->property("noticeText").toString(), QStringLiteral("Skipped a file that won't open."));
     QCOMPARE(backend.source(), videoUrl());
     QCOMPARE(timeline->clips(), wholeVideo(1.0));
 
@@ -1480,6 +1481,7 @@ void BackendTests::qmlDropLandsAfterThePlayheadsClip() {
                               QUrl::fromLocalFile(third)}));
     QCOMPARE(errors.count(), 1);
     QCOMPARE(timeline->clips(), (edit::Clips{{0, 0.0, 0.5}, {1, 0.0, 2.0}, {2, 0.0, 3.0}, {0, 0.5, 1.0}}));
+    QCOMPARE(window->property("noticeText").toString(), QStringLiteral("Skipped a file that won't open."));
     QVERIFY(!dropUrls(window, {QUrl(QStringLiteral("file:////host/share/a.mp4"))}));
 }
 

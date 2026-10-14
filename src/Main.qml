@@ -57,7 +57,8 @@ ApplicationWindow {
     // Dropped videos open into an empty window, and otherwise join the edit
     // after the clip under the playhead, in the order dropped, the way the +
     // button adds one. Adding is undoable, so a stray drop costs nothing.
-    // A file that won't open is skipped, with its error, and the rest go on.
+    // A file that won't open is skipped and the rest go on; when some made
+    // it, one notice counts the skipped, since each error replaces the last.
     function dropVideos(urls) {
         var t = editBar.playheadSec, added = 0;
         for (var i = 0; i < urls.length; ++i) {
@@ -67,6 +68,9 @@ ApplicationWindow {
             ++added;
             t = timeline.clipStart(at);
         }
+        var skipped = urls.length - added;
+        if (added > 0 && skipped > 0)
+            showNotice(skipped === 1 ? "Skipped a file that won't open." : "Skipped " + skipped + " files that won't open.");
         return added > 0;
     }
     function exportVideo() {

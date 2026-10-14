@@ -161,6 +161,8 @@ ApplicationWindow {
             sequence: index.toString()
             context: Qt.ApplicationShortcut
             enabled: win.editing
+            // Held down, repeats would keep seeking to the same spot.
+            autoRepeat: false
             onActivated: seekTo(timeline.duration * index / 10)
         }
     }

@@ -72,16 +72,6 @@ Requirements:
 ./bin/test
 ```
 
-## Package
-
-Build and install the local Arch package:
-
-```bash
-./bin/install
-```
-
-This runs `./bin/build`, then `makepkg -fsi` from `pkgbuild/` so same-version local packages are rebuilt and reinstalled. Extra arguments are passed through to `makepkg`, for example `./bin/install --clean`. The package installs the binary, desktop entry, app icon, and MIT license. Local package outputs such as `pkgbuild/pkg/`, `pkgbuild/src/`, and `*.pkg.tar.*` are ignored.
-
 ## License
 
 MIT. See `LICENSE`.

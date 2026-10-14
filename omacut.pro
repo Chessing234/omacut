@@ -9,7 +9,6 @@ HEADERS += \
     src/portalfilepicker.h \
     src/edit.h \
     src/ffmpeg.h \
-    src/thumbworker.h \
     src/thumbprovider.h \
     src/timeline.h \
     src/backend.h
@@ -19,7 +18,6 @@ SOURCES += \
     src/portalfilepicker.cpp \
     src/edit.cpp \
     src/ffmpeg.cpp \
-    src/thumbworker.cpp \
     src/thumbprovider.cpp \
     src/timeline.cpp \
     src/backend.cpp

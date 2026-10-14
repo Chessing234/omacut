@@ -193,11 +193,13 @@ private slots:
     void loadRefusesAnythingButAbsoluteLocalPaths();
     void addingAVideoInsertsItAfterThePlayheadsClip();
     void probeReportsTheDisplayedSize();
+    void probeReadsStreamedWebmAndSkipsCoverArt();
     void thumbProviderServesAndCachesFrames();
     void thumbProviderStopsBlockedJobs();
     void exportDialogDelegatesSuggestedUrl();
     void suggestedExportUrlAlwaysUsesMp4();
     void exportClipWritesMp4();
+    void exportOddSizedWebmWritesEvenMp4();
     void exportKeepsOnlyTheClipsFromTheDialog();
     void exportJoinsDifferentVideos();
     void exportSkipsClipsWhoseVideoIsGone();
@@ -407,6 +409,70 @@ void BackendTests::probeReportsTheDisplayedSize() {
     QCOMPARE(ffmpeg::probe(pal).height, 576);
 }
 
+void BackendTests::probeReadsStreamedWebmAndSkipsCoverArt() {
+    const QString ffmpegBin = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+    QVERIFY(!ffmpegBin.isEmpty());
+
+    // Streamed to a pipe, a WebM's header carries no duration at all (the way
+    // a browser's MediaRecorder writes one); probe falls back to the packets.
+    const QString streamed = m_dir.filePath(QStringLiteral("streamed.webm"));
+    {
+        QProcess proc;
+        proc.setStandardOutputFile(streamed);
+        proc.start(ffmpegBin, {
+            QStringLiteral("-loglevel"), QStringLiteral("error"),
+            QStringLiteral("-f"), QStringLiteral("lavfi"),
+            QStringLiteral("-i"), QStringLiteral("testsrc=size=32x32:rate=10:duration=1.5"),
+            QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
+            QStringLiteral("-c:v"), QStringLiteral("libvpx-vp9"),
+            QStringLiteral("-f"), QStringLiteral("webm"),
+            QStringLiteral("pipe:1"),
+        });
+        QVERIFY(proc.waitForFinished(10000));
+        QCOMPARE(proc.exitCode(), 0);
+    }
+    const ffmpeg::VideoInfo webmInfo = ffmpeg::probe(streamed);
+    QVERIFY2(webmInfo.ok, qPrintable(webmInfo.error));
+    QVERIFY2(qAbs(webmInfo.duration - 1.5) < 0.15, qPrintable(QString::number(webmInfo.duration)));
+
+    // Embedded cover art is a video stream too, but not the one to edit.
+    const QString cover = m_dir.filePath(QStringLiteral("cover.jpg"));
+    const QString withCover = m_dir.filePath(QStringLiteral("with-cover.mp4"));
+    {
+        QProcess proc;
+        proc.start(ffmpegBin, {
+            QStringLiteral("-loglevel"), QStringLiteral("error"),
+            QStringLiteral("-f"), QStringLiteral("lavfi"),
+            QStringLiteral("-i"), QStringLiteral("color=c=red:size=16x16:d=1"),
+            QStringLiteral("-frames:v"), QStringLiteral("1"),
+            QStringLiteral("-y"), cover,
+        });
+        QVERIFY(proc.waitForFinished(10000));
+        QCOMPARE(proc.exitCode(), 0);
+
+        proc.start(ffmpegBin, {
+            QStringLiteral("-loglevel"), QStringLiteral("error"),
+            QStringLiteral("-i"), cover,
+            QStringLiteral("-f"), QStringLiteral("lavfi"),
+            QStringLiteral("-i"), QStringLiteral("testsrc=size=64x32:rate=1:duration=2"),
+            QStringLiteral("-map"), QStringLiteral("0:v:0"),
+            QStringLiteral("-map"), QStringLiteral("1:v:0"),
+            QStringLiteral("-c:v:0"), QStringLiteral("mjpeg"),
+            QStringLiteral("-disposition:v:0"), QStringLiteral("attached_pic"),
+            QStringLiteral("-c:v:1"), QStringLiteral("libx264"),
+            QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
+            QStringLiteral("-y"), withCover,
+        });
+        QVERIFY(proc.waitForFinished(10000));
+        QCOMPARE(proc.exitCode(), 0);
+    }
+    const ffmpeg::VideoInfo coverInfo = ffmpeg::probe(withCover);
+    QVERIFY2(coverInfo.ok, qPrintable(coverInfo.error));
+    QCOMPARE(coverInfo.width, 64);
+    QCOMPARE(coverInfo.height, 32);
+    QVERIFY2(qAbs(coverInfo.duration - 2.0) < 0.15, qPrintable(QString::number(coverInfo.duration)));
+}
+
 void BackendTests::thumbProviderServesAndCachesFrames() {
     ThumbProvider provider;
     provider.setVideo(7, m_videoPath);
@@ -524,6 +590,44 @@ void BackendTests::exportClipWritesMp4() {
     QVERIFY(ffmpeg::probe(mp4Path).ok);
     QVERIFY2(formatName(mp4Path).contains(QStringLiteral("mp4")),
              qPrintable(formatName(mp4Path)));
+}
+
+void BackendTests::exportOddSizedWebmWritesEvenMp4() {
+    // Region and window captures can have odd dimensions (which VP9/WebM
+    // allows and libx264 refuses unless rounded down to even).
+    const QString oddWebm = m_dir.filePath(QStringLiteral("odd-region.webm"));
+    {
+        QProcess proc;
+        proc.start(QStandardPaths::findExecutable(QStringLiteral("ffmpeg")), {
+            QStringLiteral("-loglevel"), QStringLiteral("error"),
+            QStringLiteral("-f"), QStringLiteral("lavfi"),
+            QStringLiteral("-i"), QStringLiteral("testsrc=size=33x35:rate=10:duration=1"),
+            QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
+            QStringLiteral("-c:v"), QStringLiteral("libvpx-vp9"),
+            QStringLiteral("-y"), oddWebm,
+        });
+        QVERIFY(proc.waitForFinished(10000));
+        QCOMPARE(proc.exitCode(), 0);
+    }
+
+    ThumbProvider provider;
+    auto *picker = new FakeFilePicker;
+    Backend backend(&provider, picker);
+    QSignalSpy doneSpy(&backend, &Backend::exportDone);
+    QSignalSpy failedSpy(&backend, &Backend::exportFailed);
+
+    QVERIFY(backend.load(QUrl::fromLocalFile(oddWebm)));
+    waitForBackgroundWork(backend);
+
+    const QString outPath = m_dir.filePath(QStringLiteral("odd-region-exported.mp4"));
+    backend.exportClips(QUrl::fromLocalFile(outPath), backend.timeline()->clips());
+    QTRY_VERIFY_WITH_TIMEOUT(doneSpy.count() + failedSpy.count() > 0, 20000);
+    QVERIFY2(failedSpy.isEmpty(), qPrintable(failedSpy.value(0).value(0).toString()));
+
+    const ffmpeg::VideoInfo info = ffmpeg::probe(outPath);
+    QVERIFY(info.ok);
+    QCOMPARE(info.width, 32);
+    QCOMPARE(info.height, 34);
 }
 
 QString BackendTests::makeVideo(const QString &name, double duration, bool audio, const QString &size) {
@@ -1363,6 +1467,7 @@ void BackendTests::trimArgsReencodeForPreciseCuts() {
                                               QStringLiteral("out.mp4"), 1920, 1080);
 
     QVERIFY(args.contains(QStringLiteral("libx264")));
+    QVERIFY(args.contains(QStringLiteral("yuv420p")));
     QVERIFY(args.contains(QStringLiteral("aac")));
     QVERIFY(args.contains(QStringLiteral("+faststart")));
     QVERIFY(!args.contains(QStringLiteral("copy")));
@@ -1423,6 +1528,11 @@ void BackendTests::trimArgsScaleTheShorterSide() {
     // No scale request, no scale filter.
     QVERIFY(!filterGraph(ffmpeg::trimArgs(segment, QStringLiteral("out.mp4"), 1920, 1080))
                  .contains(QStringLiteral("scale")));
+
+    // Odd sides are rounded down to even so libx264 can open the encoder.
+    QCOMPARE(filterGraph(ffmpeg::trimArgs(segment, QStringLiteral("out.mp4"), 1921, 1080)),
+             QStringLiteral("[0:v:0][0:a:0]concat=n=1:v=1:a=1[joined][a];"
+                            "[joined]scale='trunc(iw/2)*2':'trunc(ih/2)*2'[v]"));
 
     // The filter caps whichever side is shorter, keeping the aspect ratio for
     // portrait and landscape alike.

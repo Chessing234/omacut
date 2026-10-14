@@ -14,6 +14,60 @@ namespace {
 constexpr int kProbeTimeoutMs = 15000;
 // Poll granularity while waiting on a thumbnail child, so cancellation is prompt.
 constexpr int kThumbPollMs = 50;
+
+// Matroska/WebM muxers often store duration as a "HH:MM:SS.nnnnnnnnn" tag.
+double parseTagDuration(const QJsonObject &tags) {
+    for (auto it = tags.begin(); it != tags.end(); ++it) {
+        if (!it.key().startsWith(QStringLiteral("DURATION"), Qt::CaseInsensitive))
+            continue;
+        const QStringList parts = it.value().toString().split(QLatin1Char(':'));
+        if (parts.size() != 3)
+            continue;
+        bool hOk = false, mOk = false, sOk = false;
+        const int h = parts[0].toInt(&hOk);
+        const int m = parts[1].toInt(&mOk);
+        const double s = parts[2].toDouble(&sOk);
+        if (hOk && mOk && sOk)
+            return h * 3600.0 + m * 60.0 + s;
+    }
+    return 0.0;
+}
+
+// Streamed WebM/MKV captures (e.g. from a browser's MediaRecorder) have no
+// duration in the header or tags; scan the video stream's packet timestamps.
+double probePacketDuration(const QString &ffprobe, const QString &path, int streamIndex) {
+    QProcess proc;
+    proc.start(ffprobe, {
+        "-v", "error",
+        "-select_streams", QString::number(streamIndex),
+        "-show_entries", "packet=pts_time,duration_time",
+        "-of", "csv=p=0",
+        path,
+    });
+    if (!proc.waitForFinished(kProbeTimeoutMs)) {
+        proc.kill();
+        proc.waitForFinished(-1);
+        return 0.0;
+    }
+    if (proc.exitStatus() != QProcess::NormalExit || proc.exitCode() != 0)
+        return 0.0;
+
+    double duration = 0.0;
+    for (const QByteArray &raw : proc.readAllStandardOutput().split('\n')) {
+        const QByteArray line = raw.trimmed();
+        if (line.isEmpty())
+            continue;
+        const QList<QByteArray> fields = line.split(',');
+        bool ptsOk = false;
+        const double pts = fields.value(0).toDouble(&ptsOk);
+        if (!ptsOk)
+            continue;
+        bool durOk = false;
+        const double pktDur = fields.value(1).toDouble(&durOk);
+        duration = qMax(duration, pts + (durOk && pktDur > 0.0 ? pktDur : 0.0));
+    }
+    return duration;
+}
 }
 
 QString toolPath(const QString &tool) {
@@ -58,7 +112,9 @@ VideoInfo probe(const QString &path) {
     for (const QJsonValue &value : root.value("streams").toArray()) {
         const QJsonObject candidate = value.toObject();
         const QString type = candidate.value("codec_type").toString();
-        if (type == "video" && stream.isEmpty())
+        // Skip embedded cover art, which ffprobe lists as a single-frame video stream.
+        if (type == "video" && stream.isEmpty()
+                && candidate.value("disposition").toObject().value("attached_pic").toInt() != 1)
             stream = candidate;
         else if (type == "audio")
             info.audio = true;
@@ -84,16 +140,24 @@ VideoInfo probe(const QString &path) {
     if (qAbs(rotation) % 180 == 90)
         std::swap(info.width, info.height);
 
-    // Duration can live on the stream or on the container.
+    // Duration can live on the stream, on the container, in a Matroska DURATION
+    // tag, or (for streamed WebM captures) on the last video packet.
     QString durationStr = stream.value("duration").toString();
     if (durationStr.isEmpty())
         durationStr = root.value("format").toObject().value("duration").toString();
-    if (durationStr.isEmpty()) {
-        info.error = "Could not determine the video duration.";
-        return info;
+    if (!durationStr.isEmpty()) {
+        info.duration = durationStr.toDouble();
+    } else {
+        info.duration = parseTagDuration(stream.value("tags").toObject());
+        if (info.duration <= 0.0)
+            info.duration = parseTagDuration(root.value("format").toObject().value("tags").toObject());
+        if (info.duration <= 0.0)
+            info.duration = probePacketDuration(ffprobe, path, stream.value("index").toInt());
+        if (info.duration <= 0.0) {
+            info.error = "Could not determine the video duration.";
+            return info;
+        }
     }
-
-    info.duration = durationStr.toDouble();
 
     info.ok = info.duration > 0.0;
     if (!info.ok)
@@ -187,14 +251,19 @@ QStringList trimArgs(const QList<Segment> &segments, const QString &dst,
     if (scaleHeight > 0)
         graph += QString("[joined]%1;[joined]scale='if(gt(iw,ih),-2,%2)':'if(gt(iw,ih),%2,-2)'[v]")
                      .arg(audio ? "[a]" : "").arg(scaleHeight);
+    else if (!mixed && (width % 2 != 0 || height % 2 != 0))
+        graph += QString("[joined]%1;[joined]scale='trunc(iw/2)*2':'trunc(ih/2)*2'[v]")
+                     .arg(audio ? "[a]" : "");
     else
         graph += QString("[v]") + (audio ? "[a]" : "");
     args << "-filter_complex" << graph << "-map" << "[v]";
     if (audio)
         args << "-map" << "[a]" << "-c:a" << "aac";
     // +faststart puts the moov atom up front so shared clips start playing
-    // before they finish downloading.
-    args << "-c:v" << "libx264" << "-preset" << "veryfast" << "-crf" << "18"
+    // before they finish downloading; yuv420p keeps RGB/4:4:4/10-bit sources
+    // playable everywhere.
+    args << "-c:v" << "libx264" << "-pix_fmt" << "yuv420p"
+         << "-preset" << "veryfast" << "-crf" << "18"
          << "-movflags" << "+faststart"
          << dst;
     return args;

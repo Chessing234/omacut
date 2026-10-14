@@ -7,11 +7,7 @@ pkgdesc='Dead-simple video length trimmer built with Qt Quick and ffmpeg'
 arch=('x86_64' 'aarch64')
 url='https://github.com/omacom-io/omacut'
 license=('MIT')
-install='omacut.install'
 depends=('ffmpeg' 'qt6-base' 'qt6-declarative' 'qt6-multimedia' 'xdg-desktop-portal')
-makedepends=('gcc' 'make' 'qt6-base' 'qt6-declarative' 'qt6-multimedia')
-source=()
-sha256sums=()
 
 build() {
   cd "$startdir/.."

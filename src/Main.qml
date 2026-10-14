@@ -798,7 +798,7 @@ ApplicationWindow {
     Rectangle {
         visible: win.helpVisible
         anchors.fill: parent
-        color: "#000000cc"
+        color: "#cc000000"
 
         MouseArea {
             anchors.fill: parent
@@ -870,7 +870,7 @@ ApplicationWindow {
     Rectangle {
         visible: win.quitConfirmVisible
         anchors.fill: parent
-        color: "#000000cc"
+        color: "#cc000000"
         onVisibleChanged: {
             if (visible)
                 quitExportButton.forceActiveFocus();

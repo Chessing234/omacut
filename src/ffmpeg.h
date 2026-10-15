@@ -13,6 +13,9 @@ namespace ffmpeg {
 struct VideoInfo {
     QString path;
     double duration = 0.0;  // seconds
+    // Where the timestamps start. Packet times include it; seeks and the
+    // player's positions count from it as 0.
+    double start = 0.0;
     // As displayed: swapped for video rotated a quarter turn.
     int width = 0;
     int height = 0;
@@ -29,6 +32,23 @@ VideoInfo probe(const QString &path);
 // the ffmpeg child is running, the child is killed and a null QImage returned.
 QImage thumbnail(const QString &path, double time, int height = 90,
                  const std::atomic<bool> *cancel = nullptr);
+
+// ffprobe arguments listing the video packet times around `pts` (a packet
+// time, not a seek time), from far enough back to find the frame on screen.
+QStringList shownFrameArgs(const QString &path, double pts);
+// The frame on screen at `pts`, the latest listed packet time not after it
+// (`pts` itself when none is listed), and the keyframe it decodes from (-1
+// when none is listed).
+struct ShownFrame {
+    double time = 0.0;
+    double keyframe = -1.0;
+};
+ShownFrame shownFrame(const QByteArray &packets, double pts);
+// ffmpeg arguments that write the frame starting at `frameTime` seconds to
+// `pngPath`, full size, upright and with square pixels, decoding from the
+// keyframe at `keyframeTime` (or from the start, when negative).
+QStringList frameArgs(const QString &path, double frameTime, double keyframeTime,
+                      const QString &pngPath);
 
 // A stretch [start, end] seconds of one video, as exported.
 struct Segment {

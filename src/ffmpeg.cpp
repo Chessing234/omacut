@@ -130,6 +130,8 @@ VideoInfo probe(const QString &path) {
     if (qAbs(rotation) % 180 == 90)
         std::swap(info.width, info.height);
 
+    info.start = root.value("format").toObject().value("start_time").toString().toDouble();
+
     // Duration can live on the stream, on the container, or (for streamed
     // WebM captures) only on the last video packet.
     QString durationStr = stream.value("duration").toString();
@@ -189,6 +191,65 @@ QImage thumbnail(const QString &path, double time, int height,
     QImage img;
     img.loadFromData(data, "JPEG");
     return img;
+}
+
+QStringList shownFrameArgs(const QString &path, double pts) {
+    // Packets only, nothing decoded, so reaching back 30s is cheap. That
+    // covers a recording's still last frame, held long past its start. The
+    // 10s past it covers B-frames, whose packets come after later frames',
+    // by a few frames: seconds, at a frame a second.
+    return {
+        "-v", "error",
+        "-select_streams", "V:0",
+        "-read_intervals", QString("%1%%2").arg(qMax(pts - 30.0, 0.0), 0, 'f', 3)
+                               .arg(pts + 10.0, 0, 'f', 3),
+        "-show_entries", "packet=pts_time,flags",
+        "-of", "csv=p=0",
+        path,
+    };
+}
+
+ShownFrame shownFrame(const QByteArray &packets, double pts) {
+    QList<std::pair<double, bool>> listed;  // time, keyframe
+    double shown = -1.0;
+    for (const QByteArray &line : packets.split('\n')) {
+        // "time,flags", with empty fields after it in some containers.
+        const QList<QByteArray> fields = line.trimmed().split(',');
+        bool ok = false;
+        const double time = fields.value(0).toDouble(&ok);
+        if (!ok)
+            continue;
+        listed.append({time, fields.value(1).startsWith('K')});
+        if (time <= pts + 0.0005)
+            shown = qMax(shown, time);
+    }
+    ShownFrame frame;
+    frame.time = shown >= 0.0 ? shown : pts;
+    for (const auto &[time, key] : listed) {
+        if (key && time <= frame.time)
+            frame.keyframe = qMax(frame.keyframe, time);
+    }
+    return frame;
+}
+
+QStringList frameArgs(const QString &path, double frameTime, double keyframeTime,
+                      const QString &pngPath) {
+    // Jump to the keyframe, then decode up to a hair before the frame's start
+    // (which ffprobe printed rounded). Jumping anywhere else can come up
+    // empty: MPEG-TS has no index, so it lands mid-stream with nothing to
+    // decode from.
+    const double target = qMax(frameTime - 0.0005, 0.0);
+    const double jump = qBound(0.0, keyframeTime, target);
+    return {
+        "-loglevel", "error",
+        "-y",
+        "-ss", QString::number(jump, 'f', 6),
+        "-i", path,
+        "-ss", QString::number(target - jump, 'f', 6),
+        "-frames:v", "1",
+        "-vf", "scale=round(iw*sar):ih,setsar=1",
+        pngPath,
+    };
 }
 
 QStringList trimArgs(const QList<Segment> &segments, const QString &dst,

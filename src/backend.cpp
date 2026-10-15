@@ -5,10 +5,13 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QProcess>
+#include <QTemporaryFile>
 #include <QTextStream>
+#include <QTimer>
 #include <QVariantMap>
 
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <utility>
 
@@ -67,7 +70,11 @@ Backend::Backend(ThumbProvider *provider, FilePicker *filePicker, QObject *paren
     loadThemeAccent();
 }
 
-Backend::~Backend() = default;
+Backend::~Backend() {
+    // Quit mid-save: the ffmpeg writing it dies with us, so its file goes too.
+    if (!m_framePart.isEmpty())
+        QFile::remove(m_framePart);
+}
 
 void Backend::wireFilePicker() {
     connect(m_filePicker, &FilePicker::openSelected, this, [this](const QUrl &url) {
@@ -255,6 +262,108 @@ void Backend::exportDialog() {
     m_exportDialogClips = m_timeline.clips();
     const ffmpeg::VideoInfo &frame = m_videos.value(m_exportDialogClips.value(0).source).info;
     m_filePicker->exportVideo(suggestedExportUrl(), exportHeights(frame.width, frame.height));
+}
+
+void Backend::saveFrame(double t) {
+    if (m_savingFrame || m_videos.isEmpty() || m_timeline.duration() <= 0)
+        return;
+    t = qBound(0.0, t, m_timeline.duration());
+    const int index = m_timeline.clipAt(t);
+    const edit::Clips clips = m_timeline.clips();
+    if (index < 0 || index >= clips.size())
+        return;
+    const edit::Clip clip = clips.at(index);
+    if (clip.source < 0 || clip.source >= m_videos.size())
+        return;
+    const double sourceTime = clip.in + (t - m_timeline.clipStart(index));
+    const QString path = QFileInfo(m_videos.at(clip.source).info.path).absoluteFilePath();
+    const double start = m_videos.at(clip.source).info.start;
+    const QString ffprobeBin = ffmpeg::toolPath("ffprobe");
+    const QString ffmpegBin = ffmpeg::toolPath("ffmpeg");
+    if (ffprobeBin.isEmpty() || ffmpegBin.isEmpty()) {
+        emit frameFailed(QStringLiteral("ffmpeg is not installed."));
+        return;
+    }
+
+    // In the background, as a 4K frame takes long enough to stall the
+    // window: first find the frame on screen, then write it.
+    m_savingFrame = true;
+    runFrameStep(ffprobeBin, ffmpeg::shownFrameArgs(path, start + sourceTime),
+                 [this, path, start, sourceTime, ffmpegBin](const QByteArray &packetTimes) {
+        const ffmpeg::ShownFrame shown = ffmpeg::shownFrame(packetTimes, start + sourceTime);
+        const double frameTime = shown.time - start;
+        const double keyframeTime = shown.keyframe >= 0.0 ? shown.keyframe - start : -1.0;
+        const QFileInfo source(path);
+        // Written under a hidden name, then given the first free one, so a
+        // failed or interrupted save leaves no half PNG and never replaces one.
+        QTemporaryFile part(source.absolutePath() + QStringLiteral("/.omacut-frame-XXXXXX.png"));
+        part.setAutoRemove(false);
+        if (!part.open()) {
+            m_savingFrame = false;
+            emit frameFailed(part.errorString());
+            return;
+        }
+        const QString partPath = part.fileName();
+        part.close();
+        m_framePart = partPath;
+        runFrameStep(ffmpegBin, ffmpeg::frameArgs(path, frameTime, keyframeTime, partPath),
+                     [this, source, partPath](const QByteArray &) {
+            m_savingFrame = false;
+            m_framePart.clear();
+            if (QFileInfo(partPath).size() <= 0) {
+                QFile::remove(partPath);
+                emit frameFailed(QStringLiteral("There's no frame there."));
+                return;
+            }
+            const QString stem = source.absolutePath() + QLatin1Char('/') + source.completeBaseName();
+            QString pngPath = stem + QStringLiteral("-frame.png");
+            for (int n = 2; !QFile::rename(partPath, pngPath); ++n) {
+                if (!QFileInfo::exists(pngPath) || n > 1000) {
+                    QFile::remove(partPath);
+                    emit frameFailed(QStringLiteral("Could not write %1.").arg(pngPath));
+                    return;
+                }
+                pngPath = stem + QStringLiteral("-frame-%1.png").arg(n);
+            }
+            // The temporary file was private; the frame is as shareable as any.
+            QFile::setPermissions(pngPath, QFile::ReadOwner | QFile::WriteOwner
+                                               | QFile::ReadGroup | QFile::ReadOther);
+            emit frameSaved(pngPath);
+        }, partPath);
+    });
+}
+
+void Backend::runFrameStep(const QString &program, const QStringList &args,
+                           std::function<void(const QByteArray &)> done, const QString &partPath) {
+    auto *proc = new QProcess(this);
+    // A stuck file (say, on a hung network mount) mustn't block F for good.
+    QTimer::singleShot(30000, proc, [proc] { proc->kill(); });
+    connect(proc, &QProcess::finished, this,
+            [this, proc, done, partPath](int code, QProcess::ExitStatus status) {
+        const QByteArray out = proc->readAllStandardOutput();
+        const QString err = QString::fromUtf8(proc->readAllStandardError()).trimmed();
+        proc->deleteLater();
+        if (status != QProcess::NormalExit || code != 0) {
+            m_savingFrame = false;
+            m_framePart.clear();
+            if (!partPath.isEmpty())
+                QFile::remove(partPath);
+            emit frameFailed(err.isEmpty() ? QStringLiteral("ffmpeg failed.") : err);
+            return;
+        }
+        done(out);
+    });
+    connect(proc, &QProcess::errorOccurred, this, [this, proc, partPath](QProcess::ProcessError error) {
+        if (error != QProcess::FailedToStart)
+            return;
+        m_savingFrame = false;
+        m_framePart.clear();
+        if (!partPath.isEmpty())
+            QFile::remove(partPath);
+        proc->deleteLater();
+        emit frameFailed(proc->errorString());
+    });
+    proc->start(program, args);
 }
 
 QList<int> Backend::exportHeights(int width, int height) {

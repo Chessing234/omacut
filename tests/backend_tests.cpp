@@ -7,6 +7,7 @@
 #include <QMimeData>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QImage>
 #include <QFileInfo>
 #include <QProcess>
 #include <QQmlApplicationEngine>
@@ -97,6 +98,7 @@ public:
         exportedClips = timeline.clips();
     }
     Q_INVOKABLE QUrl suggestedExportUrl() const { return {}; }
+    Q_INVOKABLE void saveFrame(double) {}
 
     void announceInfo() {
         timeline.reset(m_duration);
@@ -128,6 +130,8 @@ signals:
     void themeAccentChanged();
     void exportDone(const QString &path);
     void exportFailed(const QString &message);
+    void frameSaved(const QString &path);
+    void frameFailed(const QString &message);
     void loadError(const QString &message);
 
 private:
@@ -199,6 +203,10 @@ private slots:
     void exportDialogDelegatesSuggestedUrl();
     void suggestedExportUrlAlwaysUsesMp4();
     void exportClipWritesMp4();
+    void saveFrameWritesPngBesideTheSource();
+    void saveFrameSquaresStretchedPixels();
+    void shownFrameIsTheLastToStartByThen();
+    void saveFrameTakesTheFrameOnScreen();
     void exportOddSizedWebmWritesEvenMp4();
     void exportKeepsOnlyTheClipsFromTheDialog();
     void exportJoinsDifferentVideos();
@@ -576,6 +584,119 @@ void BackendTests::suggestedExportUrlAlwaysUsesMp4() {
 
     QCOMPARE(backend.suggestedExportUrl(),
              QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("renamed-source_trimmed.mp4"))));
+}
+
+void BackendTests::saveFrameWritesPngBesideTheSource() {
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    QSignalSpy savedSpy(&backend, &Backend::frameSaved);
+    QSignalSpy failedSpy(&backend, &Backend::frameFailed);
+    QVERIFY(backend.load(videoUrl()));
+
+    // Written in the background, a lossless full-size PNG.
+    backend.saveFrame(0.0);
+    QTRY_VERIFY_WITH_TIMEOUT(savedSpy.count() + failedSpy.count() > 0, 10000);
+    QVERIFY2(failedSpy.isEmpty(), qPrintable(failedSpy.value(0).value(0).toString()));
+    const QString png = savedSpy.first().at(0).toString();
+    QVERIFY(png.endsWith(QStringLiteral("clip-frame.png")));
+    QCOMPARE(formatName(png), QStringLiteral("png_pipe"));
+    QImage frame(png);
+    QCOMPARE(frame.size(), QSize(32, 32));
+    // The status line keeps showing the playhead.
+    QVERIFY(backend.status().isEmpty());
+
+    // A second save gets its own name, and a press while one is running is ignored.
+    backend.saveFrame(0.0);
+    backend.saveFrame(0.0);
+    QTRY_VERIFY_WITH_TIMEOUT(savedSpy.count() + failedSpy.count() > 1, 10000);
+    QTest::qWait(300);
+    QCOMPARE(savedSpy.count(), 2);
+    QVERIFY(savedSpy.at(1).at(0).toString().endsWith(QStringLiteral("clip-frame-2.png")));
+    QVERIFY(!QFileInfo::exists(m_dir.filePath(QStringLiteral("clip-frame-3.png"))));
+
+    // At the very end, past the last frame's start, it's still the frame on screen.
+    backend.saveFrame(1.0);
+    QTRY_VERIFY_WITH_TIMEOUT(savedSpy.count() + failedSpy.count() > 2, 10000);
+    QVERIFY2(failedSpy.isEmpty(), qPrintable(failedSpy.value(0).value(0).toString()));
+    QVERIFY(savedSpy.at(2).at(0).toString().endsWith(QStringLiteral("clip-frame-3.png")));
+
+    // Nothing is left half-written under a hidden name.
+    QVERIFY(QDir(m_dir.path()).entryList({QStringLiteral(".omacut-frame-*")},
+                                          QDir::Files | QDir::Hidden).isEmpty());
+}
+
+void BackendTests::saveFrameTakesTheFrameOnScreen() {
+    const QString ffmpegBin = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+    // B-frames come after later frames in the file, and MPEG-TS timestamps
+    // start over a second in; at 4.35s, 10 frames a second, frame 43 is up.
+    // 4s in with a keyframe every 2s, so the frame decodes from one partway.
+    for (const QString &name : {QStringLiteral("bframes.mp4"), QStringLiteral("bframes.ts")}) {
+        const QString path = m_dir.filePath(name);
+        const QString expected = m_dir.filePath(name + QStringLiteral("-expected.png"));
+        QProcess proc;
+        proc.start(ffmpegBin, {
+            QStringLiteral("-loglevel"), QStringLiteral("error"),
+            QStringLiteral("-f"), QStringLiteral("lavfi"),
+            QStringLiteral("-i"), QStringLiteral("testsrc=size=64x48:rate=10:duration=6"),
+            QStringLiteral("-c:v"), QStringLiteral("libx264"), QStringLiteral("-bf"), QStringLiteral("3"),
+            QStringLiteral("-g"), QStringLiteral("20"),
+            QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"), QStringLiteral("-y"), path,
+        });
+        QVERIFY(proc.waitForFinished(10000) && proc.exitCode() == 0);
+        proc.start(ffmpegBin, {
+            QStringLiteral("-loglevel"), QStringLiteral("error"), QStringLiteral("-i"), path,
+            QStringLiteral("-vf"), QStringLiteral("select=eq(n\\,43),scale=round(iw*sar):ih,setsar=1"),
+            QStringLiteral("-frames:v"), QStringLiteral("1"), QStringLiteral("-y"), expected,
+        });
+        QVERIFY(proc.waitForFinished(10000) && proc.exitCode() == 0);
+
+        ThumbProvider provider;
+        Backend backend(&provider, new FakeFilePicker);
+        QSignalSpy savedSpy(&backend, &Backend::frameSaved);
+        QSignalSpy failedSpy(&backend, &Backend::frameFailed);
+        QVERIFY(backend.load(QUrl::fromLocalFile(path)));
+        backend.saveFrame(4.35);
+        QTRY_VERIFY_WITH_TIMEOUT(savedSpy.count() + failedSpy.count() > 0, 10000);
+        QVERIFY2(failedSpy.isEmpty(), qPrintable(name + ": " + failedSpy.value(0).value(0).toString()));
+        QFile saved(savedSpy.first().at(0).toString()), reference(expected);
+        QVERIFY(saved.open(QIODevice::ReadOnly) && reference.open(QIODevice::ReadOnly));
+        QVERIFY2(saved.readAll() == reference.readAll(), qPrintable(name));
+    }
+}
+
+void BackendTests::shownFrameIsTheLastToStartByThen() {
+    // As ffprobe lists them: in file order, so a B-frame's after later ones.
+    const QByteArray packets = "0.000000,K__,\n0.100000,___,\n0.300000,___\n0.200000,___,\n"
+                               "0.400000,K__\n0.500000,___\n\n";
+    QCOMPARE(ffmpeg::shownFrame(packets, 0.25).time, 0.2);
+    QCOMPARE(ffmpeg::shownFrame(packets, 0.25).keyframe, 0.0);
+    QCOMPARE(ffmpeg::shownFrame(packets, 0.4999).time, 0.5);       // printed rounded
+    QCOMPARE(ffmpeg::shownFrame(packets, 0.4999).keyframe, 0.4);
+    QCOMPARE(ffmpeg::shownFrame(packets, 9.0).time, 0.5);          // a held last frame
+    QCOMPARE(ffmpeg::shownFrame(QByteArray(), 2.5).time, 2.5);
+    QCOMPARE(ffmpeg::shownFrame(QByteArray(), 2.5).keyframe, -1.0);
+}
+
+void BackendTests::saveFrameSquaresStretchedPixels() {
+    // 40x30 stored, shown 4:3 wider: the PNG is the shape it plays at.
+    const QString path = m_dir.filePath(QStringLiteral("stretched.mp4"));
+    QProcess proc;
+    proc.start(QStandardPaths::findExecutable(QStringLiteral("ffmpeg")), {
+        QStringLiteral("-loglevel"), QStringLiteral("error"),
+        QStringLiteral("-f"), QStringLiteral("lavfi"),
+        QStringLiteral("-i"), QStringLiteral("testsrc=size=40x30:rate=1:duration=1"),
+        QStringLiteral("-vf"), QStringLiteral("setsar=4/3"),
+        QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"), QStringLiteral("-y"), path,
+    });
+    QVERIFY(proc.waitForFinished(10000) && proc.exitCode() == 0);
+
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    QSignalSpy savedSpy(&backend, &Backend::frameSaved);
+    QVERIFY(backend.load(QUrl::fromLocalFile(path)));
+    backend.saveFrame(0.0);
+    QTRY_COMPARE_WITH_TIMEOUT(savedSpy.count(), 1, 10000);
+    QCOMPARE(QImage(savedSpy.first().at(0).toString()).size(), QSize(53, 30));
 }
 
 void BackendTests::exportClipWritesMp4() {

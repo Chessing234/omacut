@@ -6,6 +6,8 @@
 #include <QUrl>
 #include <QVariantList>
 
+#include <functional>
+
 #include "ffmpeg.h"
 #include "timeline.h"
 
@@ -60,6 +62,10 @@ public:
 
     // Suggested "<name>_trimmed.mp4" target next to the source.
     Q_INVOKABLE QUrl suggestedExportUrl() const;
+    // Saves the frame under t (seconds along the edit) as a PNG next to that
+    // clip's video, in the background. One at a time; frameSaved or
+    // frameFailed says how it went.
+    Q_INVOKABLE void saveFrame(double t);
 
     // Write the clips to dst. A non-zero scaleHeight downscales the shorter
     // side to that size.
@@ -77,6 +83,8 @@ signals:
     void themeAccentChanged();
     void exportDone(const QString &path);
     void exportFailed(const QString &message);
+    void frameSaved(const QString &path);
+    void frameFailed(const QString &message);
     void loadError(const QString &message);
 
 private:
@@ -94,6 +102,11 @@ private:
     };
     // Probes the video and registers its frames with the thumbnail provider.
     bool probeVideo(const QUrl &url, Video *video);
+    // One step of saving a frame: runs program, then done with its output.
+    // A failure ends the save, removing partPath if given.
+    void runFrameStep(const QString &program, const QStringList &args,
+                      std::function<void(const QByteArray &)> done,
+                      const QString &partPath = QString());
     // Whether path is the file behind one of the loaded videos.
     bool isVideoPath(const QString &path) const;
 
@@ -107,6 +120,9 @@ private:
     double m_addAt = 0.0;
     edit::Clips m_exportDialogClips;
     bool m_busy = false;
+    bool m_savingFrame = false;
+    // The hidden file a frame is being written to, until it's renamed.
+    QString m_framePart;
     QString m_status;
     QString m_themeAccent;
     QFileSystemWatcher m_themeWatcher;

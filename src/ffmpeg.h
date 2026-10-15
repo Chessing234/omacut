@@ -4,7 +4,7 @@
 #include <QString>
 #include <QStringList>
 
-#include <atomic>
+#include <functional>
 
 
 // Thin wrappers around the ffmpeg/ffprobe command-line tools.
@@ -28,10 +28,12 @@ struct VideoInfo {
 VideoInfo probe(const QString &path);
 
 // Grab a single frame at `time` seconds, scaled to `height` px.
-// Returns a null QImage on failure. If `cancel` is set and flips to true while
-// the ffmpeg child is running, the child is killed and a null QImage returned.
+// Returns a null QImage on failure. If `stopRequested` is set and starts
+// returning true while the ffmpeg child is running, the child is killed and
+// a null QImage returned; a child that never finishes is killed regardless
+// after a generous timeout.
 QImage thumbnail(const QString &path, double time, int height = 90,
-                 const std::atomic<bool> *cancel = nullptr);
+                 const std::function<bool()> &stopRequested = nullptr);
 
 // ffprobe arguments listing the video packet times around `pts` (a packet
 // time, not a seek time), from far enough back to find the frame on screen.

@@ -1,5 +1,6 @@
 #include "ffmpeg.h"
 
+#include <QElapsedTimer>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -15,6 +16,9 @@ namespace {
 constexpr int kProbeTimeoutMs = 15000;
 // Poll granularity while waiting on a thumbnail child, so cancellation is prompt.
 constexpr int kThumbPollMs = 50;
+// A thumbnail child that never finishes (a stalled file) must not occupy a
+// thumbnail worker forever; single frames take nowhere near this long.
+constexpr int kThumbTimeoutMs = 30000;
 
 // Streamed WebM/MKV captures (e.g. from a browser's MediaRecorder) have no
 // duration in the header; scan the video stream's packet timestamps. That
@@ -154,7 +158,7 @@ VideoInfo probe(const QString &path) {
 }
 
 QImage thumbnail(const QString &path, double time, int height,
-                 const std::atomic<bool> *cancel) {
+                 const std::function<bool()> &stopRequested) {
     const QString ffmpeg = toolPath("ffmpeg");
     if (ffmpeg.isEmpty())
         return {};
@@ -171,13 +175,16 @@ QImage thumbnail(const QString &path, double time, int height,
         "pipe:1",
     });
 
-    // Poll instead of waitForFinished(-1) so a cancel request can kill the child
-    // promptly — otherwise the std::future destructor in ThumbWorker would block
-    // the UI thread until ffmpeg finishes on its own.
+    // Poll instead of waitForFinished(-1) so a stop request can kill the child
+    // promptly — otherwise a worker thread would block until ffmpeg finishes
+    // on its own. The deadline bounds the wait even if nobody asks to stop.
+    QElapsedTimer deadline;
+    deadline.start();
     while (!proc.waitForFinished(kThumbPollMs)) {
         if (proc.state() == QProcess::NotRunning)
             break;  // failed to start, or exited between polls
-        if (cancel && cancel->load(std::memory_order_relaxed)) {
+        if ((stopRequested && stopRequested())
+            || deadline.elapsed() > kThumbTimeoutMs) {
             proc.kill();
             proc.waitForFinished(-1);
             return {};

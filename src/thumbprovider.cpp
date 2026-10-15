@@ -26,15 +26,21 @@ public:
         return QQuickTextureFactory::textureFactoryForImage(m_image);
     }
 
-    // A frame no longer on screen is skipped if it hasn't started. One already
-    // being extracted finishes into the cache: the next edit likely wants it.
+    // A frame no longer on screen is skipped if it hasn't started, and one
+    // already being extracted is killed: it would otherwise keep a worker
+    // (and its ffmpeg) busy for a frame nobody is waiting for.
     // The engine still waits for finished() before deleting a cancelled response.
     void cancel() override { m_cancelled = true; }
 
     void run() override {
         if (!m_cancelled && !m_path.isEmpty()) {
-            m_image = ffmpeg::thumbnail(m_path, m_time, m_height, m_provider->stopping());
-            if (!m_image.isNull())
+            m_image = ffmpeg::thumbnail(m_path, m_time, m_height, [this] {
+                return m_cancelled.load(std::memory_order_relaxed)
+                    || m_provider->stopping()->load(std::memory_order_relaxed);
+            });
+            // A frame cancelled just as it finished is not cached either:
+            // nobody is waiting for it, and the cache slot is worth more.
+            if (!m_image.isNull() && !m_cancelled)
                 m_provider->store(m_cacheId, m_image);
         }
         emit finished();

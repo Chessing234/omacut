@@ -215,10 +215,24 @@ bool PortalFilePicker::connectToRequestPath(const QString &path) {
         this, SLOT(handleResponse(uint,QVariantMap)));
 }
 
+void PortalFilePicker::closePendingRequest() {
+    if (m_pendingPath.isEmpty())
+        return;
+    QDBusInterface request(QStringLiteral("org.freedesktop.portal.Desktop"), m_pendingPath,
+                           QStringLiteral("org.freedesktop.portal.Request"),
+                           QDBusConnection::sessionBus());
+    request.asyncCall(QStringLiteral("Close"));
+}
+
 void PortalFilePicker::requestFile(const QString &method, const QString &title,
                                    QVariantMap options, Action action) {
-    if (m_pendingAction != Action::None)
-        return;
+    // A request whose Response never arrives (the portal crashed or was
+    // killed with the dialog up) must not wedge every later dialog behind
+    // it: close the stuck one best-effort and replace it.
+    if (m_pendingAction != Action::None) {
+        closePendingRequest();
+        clearPending();
+    }
 
     QDBusConnection bus = QDBusConnection::sessionBus();
     QDBusInterface portal(QStringLiteral("org.freedesktop.portal.Desktop"),
@@ -247,15 +261,20 @@ void PortalFilePicker::requestFile(const QString &method, const QString &title,
         return;
     }
 
+    const int generation = ++m_pendingGeneration;
     auto *watcher = new QDBusPendingCallWatcher(
         portal.asyncCall(method, QString(), title, options), this);
+    m_pendingWatcher = watcher;
 
-    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher]() {
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, generation]() {
         QDBusPendingReply<QDBusObjectPath> reply = *watcher;
         watcher->deleteLater();
+        if (m_pendingWatcher == watcher)
+            m_pendingWatcher = nullptr;
 
-        // A response may already have been handled while the reply was in flight.
-        if (m_pendingAction == Action::None)
+        // Superseded by a newer request, or a response may already have
+        // been handled while the reply was in flight.
+        if (generation != m_pendingGeneration || m_pendingAction == Action::None)
             return;
 
         if (reply.isError()) {
@@ -322,6 +341,12 @@ void PortalFilePicker::handleResponse(uint response, const QVariantMap &results)
 }
 
 void PortalFilePicker::clearPending() {
+    // A caller that never gets its reply must not outlive the request it
+    // belonged to (repeated stuck requests would otherwise pile them up).
+    if (m_pendingWatcher) {
+        m_pendingWatcher->deleteLater();
+        m_pendingWatcher = nullptr;
+    }
     if (!m_pendingPath.isEmpty()) {
         QDBusConnection::sessionBus().disconnect(
             QStringLiteral("org.freedesktop.portal.Desktop"), m_pendingPath,

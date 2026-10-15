@@ -238,6 +238,7 @@ private slots:
     void qmlDropTakesOnlyLocalFiles();
     void qmlDropLandsAfterThePlayheadsClip();
     void qmlQuitConfirmsUnexportedEdit();
+    void qmlOpenConfirmsUnexportedEdit();
     void timelineSplitsTrimsAndJoins();
     void timelineUndoesAGestureAsOneStep();
     void timelineTracksUnexportedCuts();
@@ -1506,6 +1507,48 @@ void BackendTests::formatTimeShowsHoursFromSixtyMinutes() {
     QCOMPARE(callFmt(3599.99), QStringLiteral("59:59.99"));
     QCOMPARE(callFmt(3599.999), QStringLiteral("01:00:00.00"));
     QCOMPARE(callFmt(3661.25), QStringLiteral("01:01:01.25"));
+}
+
+void BackendTests::qmlOpenConfirmsUnexportedEdit() {
+    ShortcutBackend backend(placeholderUrl(m_dir), 20.0);
+    QmlHarness harness(backend);
+    QQuickWindow *window = showEditor(harness, backend);
+    QVERIFY2(window, qPrintable(mainQmlPath()));
+
+    // Trim the video, making the work unexported.
+    QTest::keyClick(window, Qt::Key_Right, Qt::ShiftModifier);
+    QTest::keyClick(window, Qt::Key_Space, Qt::ControlModifier);
+    QTRY_COMPARE_WITH_TIMEOUT(backend.timeline.clips(), (edit::Clips{{0, 5.0, 20.0}}), 3000);
+    QTRY_COMPARE_WITH_TIMEOUT(window->property("unexported").toBool(), true, 3000);
+
+    // Ctrl+O asks before replacing the edit instead of opening the picker.
+    QTest::keyClick(window, Qt::Key_O, Qt::ControlModifier);
+    QTRY_COMPARE_WITH_TIMEOUT(window->property("openConfirmVisible").toBool(), true, 3000);
+    QCOMPARE(backend.openCount, 0);
+
+    // Keeping the edit leaves everything as it was.
+    QQuickItem *keep = dialogButton(window, QStringLiteral("Keep editing"));
+    QVERIFY(keep);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(keep));
+    QTRY_COMPARE_WITH_TIMEOUT(window->property("openConfirmVisible").toBool(), false, 3000);
+    QCOMPARE(backend.openCount, 0);
+    QCOMPARE(backend.timeline.clips(), (edit::Clips{{0, 5.0, 20.0}}));
+
+    // Clicking the preview with a video loaded does not open anything.
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                      QPoint(window->width() / 2, window->height() / 3));
+    QTest::qWait(50);
+    QCOMPARE(backend.openCount, 0);
+    QCOMPARE(window->property("openConfirmVisible").toBool(), false);
+
+    // Asking again and confirming opens the picker.
+    QTest::keyClick(window, Qt::Key_O, Qt::ControlModifier);
+    QTRY_COMPARE_WITH_TIMEOUT(window->property("openConfirmVisible").toBool(), true, 3000);
+    QQuickItem *open = dialogButton(window, QStringLiteral("Open video"));
+    QVERIFY(open);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(open));
+    QTRY_COMPARE_WITH_TIMEOUT(backend.openCount, 1, 3000);
+    QCOMPARE(window->property("openConfirmVisible").toBool(), false);
 }
 
 void BackendTests::qmlQuitConfirmsUnexportedEdit() {

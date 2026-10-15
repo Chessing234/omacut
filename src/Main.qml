@@ -22,6 +22,7 @@ ApplicationWindow {
     property string noticeText: ""
     property bool helpVisible: false
     property bool quitConfirmVisible: false
+    property bool openConfirmVisible: false
     readonly property string statusText: noticeText !== "" ? noticeText : backend.status
 
     readonly property var timeline: backend.timeline
@@ -30,7 +31,7 @@ ApplicationWindow {
     readonly property bool unexported: hasVideo && timeline.unexported
     // Editing shortcuts go quiet while a dialog is up, a probe is about to
     // replace the timeline, or a handle is dragged.
-    readonly property bool editing: hasVideo && timeline.duration > 0 && !quitConfirmVisible && !backend.probing && !editBar.interacting
+    readonly property bool editing: hasVideo && timeline.duration > 0 && !quitConfirmVisible && !openConfirmVisible && !backend.probing && !editBar.interacting
 
     Material.theme: Material.Dark
     Material.accent: win.accent
@@ -45,9 +46,15 @@ ApplicationWindow {
         noticeTimer.restart();
     }
     // Not while exporting: the export would mark the new edit as exported.
+    // Replacing an unexported edit asks first, like quitting does.
     function openVideo() {
         if (backend.busy)
             return;
+        if (unexported) {
+            player.pause();
+            openConfirmVisible = true;
+            return;
+        }
         backend.openVideoDialog();
     }
     function addVideo() {
@@ -150,6 +157,13 @@ ApplicationWindow {
     onClosing: (close) => {
         if (win.quitting)
             return;
+        // A close with the open confirmation up just puts it away, rather
+        // than stacking the quit confirmation on top of it.
+        if (win.openConfirmVisible) {
+            close.accepted = false;
+            win.openConfirmVisible = false;
+            return;
+        }
         if (win.unexported) {
             close.accepted = false;
             if (player.playbackState === MediaPlayer.PlayingState)
@@ -180,7 +194,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "Space"
         context: Qt.ApplicationShortcut
-        enabled: win.hasVideo && !win.quitConfirmVisible
+        enabled: win.hasVideo && !win.quitConfirmVisible && !win.openConfirmVisible
         onActivated: togglePlay()
     }
 
@@ -335,7 +349,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "Ctrl+O"
         context: Qt.ApplicationShortcut
-        enabled: !win.quitConfirmVisible && !backend.busy
+        enabled: !win.quitConfirmVisible && !win.openConfirmVisible && !backend.busy
         onActivated: openVideo()
     }
 
@@ -350,7 +364,7 @@ ApplicationWindow {
         sequence: "Q"
         context: Qt.ApplicationShortcut
         onActivated: {
-            if (!win.quitConfirmVisible)
+            if (!win.quitConfirmVisible && !win.openConfirmVisible)
                 requestQuit();
         }
     }
@@ -359,7 +373,7 @@ ApplicationWindow {
         sequence: "?"
         context: Qt.ApplicationShortcut
         onActivated: {
-            if (!win.quitConfirmVisible)
+            if (!win.quitConfirmVisible && !win.openConfirmVisible)
                 win.helpVisible = !win.helpVisible;
         }
     }
@@ -370,6 +384,8 @@ ApplicationWindow {
         onActivated: {
             if (win.quitConfirmVisible)
                 win.quitConfirmVisible = false;
+            else if (win.openConfirmVisible)
+                win.openConfirmVisible = false;
             else if (win.helpVisible)
                 win.helpVisible = false;
         }
@@ -695,8 +711,11 @@ ApplicationWindow {
                 }
             }
 
+            // Only the empty state opens on a preview click: with a video
+            // loaded, a stray click must not reach the file picker at all.
             MouseArea {
                 anchors.fill: parent
+                enabled: !win.hasVideo
                 cursorShape: Qt.PointingHandCursor
                 onClicked: openVideo()
             }
@@ -833,7 +852,7 @@ ApplicationWindow {
         objectName: "videoDropArea"
         anchors.fill: parent
         z: 5
-        enabled: !win.quitConfirmVisible && !win.helpVisible && !backend.busy
+        enabled: !win.quitConfirmVisible && !win.openConfirmVisible && !win.helpVisible && !backend.busy
         // Only local files: "file:-report" or "file:http://..." would reach
         // ffprobe as an option or an address, and "file:////host/..." is a
         // network share.
@@ -957,6 +976,82 @@ ApplicationWindow {
                             text: modelData.action
                             color: "#d6d6da"
                             font.pixelSize: 13
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- open confirmation (replacing an unexported edit) ---
+    Rectangle {
+        visible: win.openConfirmVisible
+        anchors.fill: parent
+        color: "#cc000000"
+        onVisibleChanged: {
+            if (visible)
+                openKeepButton.forceActiveFocus();
+        }
+
+        MouseArea {
+            anchors.fill: parent
+            onClicked: win.openConfirmVisible = false
+        }
+
+        Rectangle {
+            anchors.centerIn: parent
+            width: openColumn.width + 64
+            height: openColumn.height + 48
+            radius: 12
+            color: "#1c1c1e"
+
+            MouseArea {
+                anchors.fill: parent
+            }
+
+            Column {
+                id: openColumn
+                anchors.centerIn: parent
+                spacing: 8
+
+                Label {
+                    text: "Unexported edit"
+                    color: "white"
+                    font.pixelSize: 16
+                    font.weight: Font.DemiBold
+                }
+
+                Label {
+                    text: "Opening another video will discard this edit. Open it anyway?"
+                    color: "#d6d6da"
+                    font.pixelSize: 13
+                    bottomPadding: 12
+                }
+
+                Row {
+                    anchors.right: parent.right
+                    spacing: 10
+
+                    DialogButton {
+                        id: openKeepButton
+                        text: "Keep editing"
+                        KeyNavigation.left: openVideoConfirmButton
+                        KeyNavigation.right: openVideoConfirmButton
+                        KeyNavigation.tab: openVideoConfirmButton
+                        KeyNavigation.backtab: openVideoConfirmButton
+                        onClicked: win.openConfirmVisible = false
+                    }
+                    DialogButton {
+                        id: openVideoConfirmButton
+                        text: "Open video"
+                        primary: true
+                        KeyNavigation.left: openKeepButton
+                        KeyNavigation.right: openKeepButton
+                        KeyNavigation.tab: openKeepButton
+                        KeyNavigation.backtab: openKeepButton
+                        onClicked: {
+                            win.openConfirmVisible = false;
+                            backend.openVideoDialog();
                         }
                     }
                 }

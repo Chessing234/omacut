@@ -29,9 +29,9 @@ ApplicationWindow {
     // Quitting only warns about unexported edits. One clip spanning the whole
     // first video is never dirty — that's just the source.
     readonly property bool unexported: hasVideo && timeline.unexported
-    // Editing shortcuts go quiet while a dialog is up, a probe is about to
-    // replace the timeline, or a handle is dragged.
-    readonly property bool editing: hasVideo && timeline.duration > 0 && !quitConfirmVisible && !openConfirmVisible && !backend.probing && !editBar.interacting
+    // Editing shortcuts go quiet while a dialog or the help overlay is up,
+    // a probe is about to replace the timeline, or a handle is dragged.
+    readonly property bool editing: hasVideo && timeline.duration > 0 && !quitConfirmVisible && !openConfirmVisible && !helpVisible && !backend.probing && !editBar.interacting
 
     Material.theme: Material.Dark
     Material.accent: win.accent
@@ -194,7 +194,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "Space"
         context: Qt.ApplicationShortcut
-        enabled: win.hasVideo && !win.quitConfirmVisible && !win.openConfirmVisible
+        enabled: win.hasVideo && !win.quitConfirmVisible && !win.openConfirmVisible && !win.helpVisible
         onActivated: togglePlay()
     }
 
@@ -339,7 +339,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "Ctrl+S"
         context: Qt.ApplicationShortcut
-        enabled: win.hasVideo && timeline.duration > 0 && !backend.busy
+        enabled: win.hasVideo && timeline.duration > 0 && !backend.busy && !win.helpVisible && !win.openConfirmVisible
         onActivated: {
             win.quitConfirmVisible = false;
             exportVideo();
@@ -349,7 +349,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "Ctrl+O"
         context: Qt.ApplicationShortcut
-        enabled: !win.quitConfirmVisible && !win.openConfirmVisible && !backend.busy
+        enabled: !win.quitConfirmVisible && !win.openConfirmVisible && !win.helpVisible && !backend.busy
         onActivated: openVideo()
     }
 
@@ -364,7 +364,7 @@ ApplicationWindow {
         sequence: "Q"
         context: Qt.ApplicationShortcut
         onActivated: {
-            if (!win.quitConfirmVisible && !win.openConfirmVisible)
+            if (!win.quitConfirmVisible && !win.openConfirmVisible && !win.helpVisible)
                 requestQuit();
         }
     }

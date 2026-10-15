@@ -239,6 +239,7 @@ private slots:
     void qmlDropLandsAfterThePlayheadsClip();
     void qmlQuitConfirmsUnexportedEdit();
     void qmlOpenConfirmsUnexportedEdit();
+    void qmlHelpOverlayBlocksEditingKeys();
     void timelineSplitsTrimsAndJoins();
     void timelineUndoesAGestureAsOneStep();
     void timelineTracksUnexportedCuts();
@@ -1549,6 +1550,41 @@ void BackendTests::qmlOpenConfirmsUnexportedEdit() {
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(open));
     QTRY_COMPARE_WITH_TIMEOUT(backend.openCount, 1, 3000);
     QCOMPARE(window->property("openConfirmVisible").toBool(), false);
+}
+
+void BackendTests::qmlHelpOverlayBlocksEditingKeys() {
+    ShortcutBackend backend(placeholderUrl(m_dir), 20.0);
+    QmlHarness harness(backend);
+    QQuickWindow *window = showEditor(harness, backend);
+    QVERIFY2(window, qPrintable(mainQmlPath()));
+
+    QTest::keyClick(window, Qt::Key_Question);
+    QTRY_COMPARE_WITH_TIMEOUT(window->property("helpVisible").toBool(), true, 3000);
+
+    // Split, delete, seek, export, play, and open all stay quiet behind
+    // the overlay.
+    QTest::keyClick(window, Qt::Key_S);
+    QTest::keyClick(window, Qt::Key_X);
+    QTest::keyClick(window, Qt::Key_Right);
+    QTest::keyClick(window, Qt::Key_O, Qt::ControlModifier);
+    QTest::keyClick(window, Qt::Key_S, Qt::ControlModifier);
+    QTest::keyClick(window, Qt::Key_Space);
+    QTest::qWait(50);
+    QCOMPARE(backend.timeline.clips(), wholeVideo(20.0));
+    QCOMPARE(playhead(harness), 0.0);
+    QCOMPARE(backend.openCount, 0);
+    QCOMPARE(backend.exportCount, 0);
+
+    // Escape closes the overlay and the keys work again.
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_COMPARE_WITH_TIMEOUT(window->property("helpVisible").toBool(), false, 3000);
+    QTest::keyClick(window, Qt::Key_S, Qt::ControlModifier);
+    QTRY_COMPARE_WITH_TIMEOUT(backend.exportCount, 1, 3000);
+    QTest::keyClick(window, Qt::Key_Right);
+    QTRY_COMPARE_WITH_TIMEOUT(playhead(harness), 1.0, 3000);
+    QTest::keyClick(window, Qt::Key_S);
+    QTRY_COMPARE_WITH_TIMEOUT(backend.timeline.clips(),
+                              (edit::Clips{{0, 0.0, 1.0}, {0, 1.0, 20.0}}), 3000);
 }
 
 void BackendTests::qmlQuitConfirmsUnexportedEdit() {

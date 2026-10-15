@@ -1,12 +1,15 @@
 #include "backend.h"
 
 #include <QColor>
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QPointer>
 #include <QProcess>
 #include <QTemporaryFile>
 #include <QTextStream>
+#include <QThreadPool>
 #include <QTimer>
 #include <QVariantMap>
 
@@ -192,55 +195,161 @@ QVariantList Backend::videoList() const {
     return result;
 }
 
-bool Backend::probeVideo(const QUrl &url, Video *video) {
+bool Backend::checkedPath(const QUrl &url, QString *path) {
     // Only absolute local paths reach ffprobe: "file:-report" would be read
     // as an option, and "file:http://..." as a network address.
-    const QString path = url.toLocalFile();
-    if (!url.isLocalFile() || !QDir::isAbsolutePath(path)) {
+    *path = url.toLocalFile();
+    if (!url.isLocalFile() || !QDir::isAbsolutePath(*path)) {
         emit loadError(QStringLiteral("Only local files can be opened."));
         return false;
     }
-    video->info = ffmpeg::probe(path);
-    if (!video->info.ok) {
-        emit loadError(video->info.error);
-        return false;
-    }
-    video->url = url;
-    video->thumbKey = ++m_nextThumbKey;
-    m_provider->setVideo(video->thumbKey, video->info.path);
     return true;
+}
+
+void Backend::enqueueVideo(const PendingVideo &pending) {
+    m_probeQueue.append(pending);
+    startNextProbe();
+}
+
+void Backend::startNextProbe() {
+    if (m_probing || m_probeQueue.isEmpty())
+        return;
+    const PendingVideo pending = m_probeQueue.takeFirst();
+    m_probing = true;
+    emit busyChanged();
+
+    // ffprobe can take seconds on a streamed file with no header duration,
+    // so it runs on a worker thread; only applying the result needs the UI
+    // thread. The guard is only read back on the UI thread, and drops the
+    // result if this backend is already gone by then.
+    const QPointer<Backend> guard(this);
+    QThreadPool::globalInstance()->start([guard, pending] {
+        const ffmpeg::VideoInfo info = ffmpeg::probe(pending.path);
+        QMetaObject::invokeMethod(QCoreApplication::instance(), [guard, pending, info] {
+            if (guard)
+                guard->applyProbe(pending, info);
+        }, Qt::QueuedConnection);
+    });
+}
+
+void Backend::applyProbe(const PendingVideo &pending, const ffmpeg::VideoInfo &info) {
+    if (!info.ok) {
+        // An export that rewrote its own source reports done either way;
+        // the reopen failing is the part the user needs explained.
+        if (pending.exportReload)
+            emit exportDone(pending.path);
+        emit loadError(pending.exportReload
+            ? QStringLiteral("Saved, but couldn't reopen it, so the clips no longer match the file.")
+            : info.error);
+        if (pending.batch)
+            ++m_batchSkipped;
+    } else {
+        Video video;
+        video.info = info;
+        video.url = pending.url;
+        video.thumbKey = ++m_nextThumbKey;
+        m_provider->setVideo(video.thumbKey, video.info.path);
+        if (pending.batch)
+            ++m_batchAdded;
+
+        if (!pending.adding || m_videos.isEmpty()) {
+            m_videos = {video};
+            m_timeline.reset(video.info.duration);
+            emit videosChanged();
+            emit infoChanged();
+        } else {
+            // A chained batch add lands after the clip the previous batch
+            // member landed on, so retarget the rest of the batch at it.
+            const int inserted = m_timeline.clipAt(pending.addAt) + 1;
+            m_videos.append(video);
+            emit videosChanged();
+            m_timeline.addSource(video.info.duration, pending.addAt);
+            if (pending.chain) {
+                const double start = m_timeline.clipStart(inserted);
+                for (PendingVideo &queued : m_probeQueue) {
+                    if (queued.batch == pending.batch)
+                        queued.addAt = start;
+                }
+            }
+        }
+        // Only now, with the saved file reopened, is the export fully
+        // done: reporting earlier let the reload erase the "Saved" notice
+        // and reset the timeline under edits made in between.
+        if (pending.exportReload)
+            emit exportDone(pending.path);
+    }
+
+    m_probing = false;
+    if (!m_probeQueue.isEmpty()) {
+        startNextProbe();
+        return;
+    }
+    emit busyChanged();
+    if (m_batchAdded > 0 && m_batchSkipped > 0)
+        emit skippedVideos(m_batchSkipped);
+    m_batchAdded = 0;
+    m_batchSkipped = 0;
 }
 
 bool Backend::load(const QUrl &url) {
     // A running export marks its clips exported when it finishes, which
     // must not land on a different set of videos.
-    if (m_busy)
+    if (busy())
         return false;
 
-    Video video;
-    if (!probeVideo(url, &video))
+    PendingVideo pending;
+    pending.url = url;
+    pending.adding = false;
+    if (!checkedPath(url, &pending.path))
         return false;
-
-    m_videos = {video};
-    m_timeline.reset(video.info.duration);
-    emit videosChanged();
-    emit infoChanged();
+    enqueueVideo(pending);
     return true;
 }
 
 bool Backend::addVideo(const QUrl &url, double t) {
-    if (m_busy)
+    if (busy())
         return false;
     if (m_videos.isEmpty())
         return load(url);
 
-    Video video;
-    if (!probeVideo(url, &video))
+    PendingVideo pending;
+    pending.url = url;
+    pending.adding = true;
+    pending.addAt = t;
+    if (!checkedPath(url, &pending.path))
+        return false;
+    enqueueVideo(pending);
+    return true;
+}
+
+bool Backend::addVideos(const QVariantList &urls, double t) {
+    if (busy() || urls.isEmpty())
         return false;
 
-    m_videos.append(video);
-    emit videosChanged();
-    m_timeline.addSource(video.info.duration, t);
+    const int batch = ++m_nextBatch;
+    int queued = 0;
+    for (const QVariant &value : urls) {
+        PendingVideo pending;
+        pending.url = value.toUrl();
+        pending.adding = true;
+        pending.chain = true;
+        pending.addAt = t;
+        pending.batch = batch;
+        if (!checkedPath(pending.url, &pending.path)) {
+            ++m_batchSkipped;
+            continue;
+        }
+        m_probeQueue.append(pending);
+        ++queued;
+    }
+    if (queued == 0) {
+        // Nothing probed, so nothing loaded: the per-file errors already
+        // said why, and the batch counters start clean for the next batch.
+        m_batchAdded = 0;
+        m_batchSkipped = 0;
+        return false;
+    }
+    startNextProbe();
     return true;
 }
 
@@ -385,7 +494,7 @@ QUrl Backend::suggestedExportUrl() const {
 }
 
 void Backend::exportClips(const QUrl &dst, const edit::Clips &clips, int scaleHeight) {
-    if (m_videos.isEmpty() || m_busy)
+    if (m_videos.isEmpty() || busy())
         return;
 
     QList<ffmpeg::Segment> segments;
@@ -475,14 +584,21 @@ void Backend::exportClips(const QUrl &dst, const edit::Clips &clips, int scaleHe
                 setStatus(QString());
                 // Written over one of its own videos: the clips' times point
                 // into a file that's gone, so start over from what was saved.
+                // The reopen probes in the background; if it fails, the probe
+                // result says the saved file couldn't be reopened.
                 if (!isVideoPath(outPath)) {
                     m_timeline.markExported(clips);
-                } else if (!load(QUrl::fromLocalFile(outPath))) {
                     emit exportDone(outPath);
-                    emit loadError(QStringLiteral("Saved, but couldn't reopen it, so the clips no longer match the file."));
-                    return;
+                } else {
+                    // exportDone waits for the reopen probe to settle.
+                    PendingVideo pending;
+                    pending.url = QUrl::fromLocalFile(outPath);
+                    pending.exportReload = true;
+                    if (checkedPath(pending.url, &pending.path))
+                        enqueueVideo(pending);
+                    else
+                        emit exportDone(outPath);
                 }
-                emit exportDone(outPath);
             });
     connect(proc, &QProcess::errorOccurred, this,
             [this, proc, tmpPath, completed](QProcess::ProcessError error) {

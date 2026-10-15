@@ -9,17 +9,17 @@
 namespace ffmpeg {
 
 namespace {
-// Upper bound on a synchronous probe so a hung/unresponsive file (e.g. a stalled
-// network mount) can't freeze the caller — load() runs probe() on the UI thread.
+// Upper bound on a probe so a hung/unresponsive file (e.g. a stalled
+// network mount) can't stall the worker thread running it forever. Callers
+// keep probe() off the UI thread; this bounds even that wait.
 constexpr int kProbeTimeoutMs = 15000;
 // Poll granularity while waiting on a thumbnail child, so cancellation is prompt.
 constexpr int kThumbPollMs = 50;
 
 // Streamed WebM/MKV captures (e.g. from a browser's MediaRecorder) have no
 // duration in the header; scan the video stream's packet timestamps. That
-// reads the whole file, on the UI thread, so it's only the last resort: a
-// couple of hours of cached video takes under a second, a slow disk up to
-// the probe timeout.
+// reads the whole file, so it's only the last resort: a couple of hours of
+// cached video takes under a second, a slow disk up to the probe timeout.
 double probePacketDuration(const QString &ffprobe, const QString &path, int streamIndex) {
     QProcess proc;
     proc.start(ffprobe, {

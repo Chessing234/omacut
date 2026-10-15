@@ -28,8 +28,9 @@ ApplicationWindow {
     // Quitting only warns about unexported edits. One clip spanning the whole
     // first video is never dirty — that's just the source.
     readonly property bool unexported: hasVideo && timeline.unexported
-    // Editing shortcuts go quiet while a dialog is up or a handle is dragged.
-    readonly property bool editing: hasVideo && timeline.duration > 0 && !quitConfirmVisible && !editBar.interacting
+    // Editing shortcuts go quiet while a dialog is up, a probe is about to
+    // replace the timeline, or a handle is dragged.
+    readonly property bool editing: hasVideo && timeline.duration > 0 && !quitConfirmVisible && !backend.probing && !editBar.interacting
 
     Material.theme: Material.Dark
     Material.accent: win.accent
@@ -58,21 +59,11 @@ ApplicationWindow {
     // Dropped videos open into an empty window, and otherwise join the edit
     // after the clip under the playhead, in the order dropped, the way the +
     // button adds one. Adding is undoable, so a stray drop costs nothing.
-    // A file that won't open is skipped and the rest go on; when some made
-    // it, one notice counts the skipped, since each error replaces the last.
+    // Probing happens in the background, in drop order; a file that won't
+    // open is skipped and the rest go on. When some made it, one notice
+    // counts the skipped, since each error replaces the last.
     function dropVideos(urls) {
-        var t = editBar.playheadSec, added = 0;
-        for (var i = 0; i < urls.length; ++i) {
-            var at = win.hasVideo ? timeline.clipAt(t) + 1 : 0;
-            if (!backend.addVideo(urls[i], t))
-                continue;
-            ++added;
-            t = timeline.clipStart(at);
-        }
-        var skipped = urls.length - added;
-        if (added > 0 && skipped > 0)
-            showNotice(skipped === 1 ? "Skipped a file that won't open." : "Skipped " + skipped + " files that won't open.");
-        return added > 0;
+        return backend.addVideos(urls, editBar.playheadSec);
     }
     function exportVideo() {
         if (!win.hasVideo || timeline.duration <= 0 || backend.busy)
@@ -769,6 +760,9 @@ ApplicationWindow {
                 id: editBar
                 objectName: "editBar"
                 Layout.fillWidth: true
+                // Frozen while a probe is in flight: it is about to replace
+                // or extend the timeline the bar is showing.
+                enabled: !backend.probing
                 accent: win.accent
                 accentForeground: win.accentForeground
                 onScrub: (seconds) => {
@@ -1084,7 +1078,11 @@ ApplicationWindow {
             win.showNotice("Could not save the frame: " + message);
         }
         function onLoadError(message) {
-            win.showNotice("Cannot open video: " + message);
+            // The export-reopen refusal is a complete sentence already.
+            win.showNotice(message.startsWith("Saved") ? message : "Cannot open video: " + message);
+        }
+        function onSkippedVideos(count) {
+            win.showNotice(count === 1 ? "Skipped a file that won't open." : "Skipped " + count + " files that won't open.");
         }
     }
 }

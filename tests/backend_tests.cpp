@@ -205,6 +205,7 @@ private slots:
     void saveFrameWritesPngBesideTheSource();
     void saveFrameSquaresStretchedPixels();
     void shownFrameIsTheLastToStartByThen();
+    void saveFrameTakesTheFrameOnScreen();
     void exportKeepsOnlyTheClipsFromTheDialog();
     void exportJoinsDifferentVideos();
     void exportSkipsClipsWhoseVideoIsGone();
@@ -535,12 +536,56 @@ void BackendTests::saveFrameWritesPngBesideTheSource() {
                                           QDir::Files | QDir::Hidden).isEmpty());
 }
 
+void BackendTests::saveFrameTakesTheFrameOnScreen() {
+    const QString ffmpegBin = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+    // B-frames come after later frames in the file, and MPEG-TS timestamps
+    // start over a second in; at 4.35s, 10 frames a second, frame 43 is up.
+    // 4s in with a keyframe every 2s, so the frame decodes from one partway.
+    for (const QString &name : {QStringLiteral("bframes.mp4"), QStringLiteral("bframes.ts")}) {
+        const QString path = m_dir.filePath(name);
+        const QString expected = m_dir.filePath(name + QStringLiteral("-expected.png"));
+        QProcess proc;
+        proc.start(ffmpegBin, {
+            QStringLiteral("-loglevel"), QStringLiteral("error"),
+            QStringLiteral("-f"), QStringLiteral("lavfi"),
+            QStringLiteral("-i"), QStringLiteral("testsrc=size=64x48:rate=10:duration=6"),
+            QStringLiteral("-c:v"), QStringLiteral("libx264"), QStringLiteral("-bf"), QStringLiteral("3"),
+            QStringLiteral("-g"), QStringLiteral("20"),
+            QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"), QStringLiteral("-y"), path,
+        });
+        QVERIFY(proc.waitForFinished(10000) && proc.exitCode() == 0);
+        proc.start(ffmpegBin, {
+            QStringLiteral("-loglevel"), QStringLiteral("error"), QStringLiteral("-i"), path,
+            QStringLiteral("-vf"), QStringLiteral("select=eq(n\\,43),scale=round(iw*sar):ih,setsar=1"),
+            QStringLiteral("-frames:v"), QStringLiteral("1"), QStringLiteral("-y"), expected,
+        });
+        QVERIFY(proc.waitForFinished(10000) && proc.exitCode() == 0);
+
+        ThumbProvider provider;
+        Backend backend(&provider, new FakeFilePicker);
+        QSignalSpy savedSpy(&backend, &Backend::frameSaved);
+        QSignalSpy failedSpy(&backend, &Backend::frameFailed);
+        QVERIFY(backend.load(QUrl::fromLocalFile(path)));
+        backend.saveFrame(4.35);
+        QTRY_VERIFY_WITH_TIMEOUT(savedSpy.count() + failedSpy.count() > 0, 10000);
+        QVERIFY2(failedSpy.isEmpty(), qPrintable(name + ": " + failedSpy.value(0).value(0).toString()));
+        QFile saved(savedSpy.first().at(0).toString()), reference(expected);
+        QVERIFY(saved.open(QIODevice::ReadOnly) && reference.open(QIODevice::ReadOnly));
+        QVERIFY2(saved.readAll() == reference.readAll(), qPrintable(name));
+    }
+}
+
 void BackendTests::shownFrameIsTheLastToStartByThen() {
-    const QByteArray times = "0.000000\n0.033367\n0.066733\n\n";
-    QCOMPARE(ffmpeg::shownFrameTime(times, 0.05), 0.033367);
-    QCOMPARE(ffmpeg::shownFrameTime(times, 0.0667), 0.066733);  // printed rounded
-    QCOMPARE(ffmpeg::shownFrameTime(times, 5.0), 0.066733);     // a held last frame
-    QCOMPARE(ffmpeg::shownFrameTime(QByteArray(), 2.5), 2.5);
+    // As ffprobe lists them: in file order, so a B-frame's after later ones.
+    const QByteArray packets = "0.000000,K__,\n0.100000,___,\n0.300000,___\n0.200000,___,\n"
+                               "0.400000,K__\n0.500000,___\n\n";
+    QCOMPARE(ffmpeg::shownFrame(packets, 0.25).time, 0.2);
+    QCOMPARE(ffmpeg::shownFrame(packets, 0.25).keyframe, 0.0);
+    QCOMPARE(ffmpeg::shownFrame(packets, 0.4999).time, 0.5);       // printed rounded
+    QCOMPARE(ffmpeg::shownFrame(packets, 0.4999).keyframe, 0.4);
+    QCOMPARE(ffmpeg::shownFrame(packets, 9.0).time, 0.5);          // a held last frame
+    QCOMPARE(ffmpeg::shownFrame(QByteArray(), 2.5).time, 2.5);
+    QCOMPARE(ffmpeg::shownFrame(QByteArray(), 2.5).keyframe, -1.0);
 }
 
 void BackendTests::saveFrameSquaresStretchedPixels() {

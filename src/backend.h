@@ -121,6 +121,8 @@ private:
     edit::Clips m_exportDialogClips;
     bool m_busy = false;
     bool m_savingFrame = false;
+    // The hidden file a frame is being written to, until it's renamed.
+    QString m_framePart;
     QString m_status;
     QString m_themeAccent;
     QFileSystemWatcher m_themeWatcher;

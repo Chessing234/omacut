@@ -23,6 +23,7 @@ class Backend : public QObject {
     // Each video a clip can come from, by source index: {url, thumbKey}.
     Q_PROPERTY(QVariantList videos READ videoList NOTIFY videosChanged)
     Q_PROPERTY(bool busy READ busy NOTIFY busyChanged)
+    Q_PROPERTY(bool probing READ probing NOTIFY busyChanged)
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
     Q_PROPERTY(QString themeAccent READ themeAccent NOTIFY themeAccentChanged)
     Q_PROPERTY(QString themeAccentForeground READ themeAccentForeground NOTIFY themeAccentChanged)
@@ -36,7 +37,10 @@ public:
 
     QUrl source() const { return m_videos.isEmpty() ? QUrl() : m_videos.first().url; }
     QVariantList videoList() const;
-    bool busy() const { return m_busy; }
+    // Busy while exporting or while a probe is in flight: either way the
+    // set of videos is about to change, so opening or adding must wait.
+    bool busy() const { return m_busy || m_probing; }
+    bool probing() const { return m_probing; }
     QString status() const { return m_status; }
     QString themeAccent() const { return m_themeAccent; }
     QString themeAccentForeground() const;
@@ -49,10 +53,17 @@ public:
     // "black" or "white", whichever stays legible on the given color.
     static QString foregroundFor(const QString &color);
 
-    // Start over with a video.
+    // Start over with a video. Probing runs off the UI thread: false means
+    // refused outright (busy, or not an absolute local path); the outcome
+    // itself arrives via infoChanged or loadError.
     Q_INVOKABLE bool load(const QUrl &url);
-    // Add a video as a clip after the one under t, sequence seconds.
+    // Add a video as a clip after the one under t, sequence seconds. Like
+    // load(), the probe finishes in the background.
     Q_INVOKABLE bool addVideo(const QUrl &url, double t);
+    // Add several videos in order, each after the previous one lands, the
+    // way a multi-file drop should behave. Failures are skipped; once the
+    // batch settles, skippedVideos says how many, if any loaded.
+    Q_INVOKABLE bool addVideos(const QVariantList &urls, double t);
 
     // Open native desktop file dialogs.
     Q_INVOKABLE void openVideoDialog();
@@ -86,6 +97,9 @@ signals:
     void frameSaved(const QString &path);
     void frameFailed(const QString &message);
     void loadError(const QString &message);
+    // An addVideos batch settled with some videos loaded and this many
+    // skipped, so the UI can summarize instead of stacking errors.
+    void skippedVideos(int count);
 
 private:
     void setBusy(bool busy);
@@ -100,8 +114,24 @@ private:
         QUrl url;
         int thumbKey = 0;
     };
-    // Probes the video and registers its frames with the thumbnail provider.
-    bool probeVideo(const QUrl &url, Video *video);
+    // The local path behind url, or an empty string (and a loadError) when
+    // it isn't an absolute local file ffprobe can safely be handed.
+    bool checkedPath(const QUrl &url, QString *path);
+    struct PendingVideo {
+        QUrl url;
+        QString path;
+        double addAt = 0.0;
+        bool adding = false;
+        bool chain = false;
+        bool exportReload = false;
+        int batch = 0;
+    };
+    // Queues a probe and starts it if none is running. Probes run one at a
+    // time, in queue order, on a worker thread.
+    void enqueueVideo(const PendingVideo &pending);
+    void startNextProbe();
+    // Applies a finished probe on the UI thread, then starts the next one.
+    void applyProbe(const PendingVideo &pending, const ffmpeg::VideoInfo &info);
     // One step of saving a frame: runs program, then done with its output.
     // A failure ends the save, removing partPath if given.
     void runFrameStep(const QString &program, const QStringList &args,
@@ -120,6 +150,11 @@ private:
     double m_addAt = 0.0;
     edit::Clips m_exportDialogClips;
     bool m_busy = false;
+    bool m_probing = false;
+    QList<PendingVideo> m_probeQueue;
+    int m_nextBatch = 0;
+    int m_batchAdded = 0;
+    int m_batchSkipped = 0;
     bool m_savingFrame = false;
     // The hidden file a frame is being written to, until it's renamed.
     QString m_framePart;

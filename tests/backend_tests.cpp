@@ -66,6 +66,7 @@ class ShortcutBackend : public QObject {
     Q_PROPERTY(QUrl source READ source NOTIFY infoChanged)
     Q_PROPERTY(QVariantList videos READ videos NOTIFY videosChanged)
     Q_PROPERTY(bool busy READ busy NOTIFY busyChanged)
+    Q_PROPERTY(bool probing READ probing NOTIFY busyChanged)
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
     Q_PROPERTY(QString themeAccent READ themeAccent NOTIFY themeAccentChanged)
     Q_PROPERTY(QString themeAccentForeground READ themeAccentForeground NOTIFY themeAccentChanged)
@@ -82,6 +83,7 @@ public:
     QUrl source() const { return m_source; }
     QVariantList videos() const { return m_videos; }
     bool busy() const { return false; }
+    bool probing() const { return false; }
     QString status() const { return {}; }
     QString themeAccent() const { return QStringLiteral("#FFD60A"); }
     QString themeAccentForeground() const { return QStringLiteral("black"); }
@@ -99,6 +101,7 @@ public:
     }
     Q_INVOKABLE QUrl suggestedExportUrl() const { return {}; }
     Q_INVOKABLE void saveFrame(double) {}
+    Q_INVOKABLE bool addVideos(const QVariantList &, double) { return false; }
 
     void announceInfo() {
         timeline.reset(m_duration);
@@ -133,6 +136,7 @@ signals:
     void frameSaved(const QString &path);
     void frameFailed(const QString &message);
     void loadError(const QString &message);
+    void skippedVideos(int count);
 
 private:
     QUrl m_source;
@@ -198,6 +202,7 @@ private slots:
     void addingAVideoInsertsItAfterThePlayheadsClip();
     void probeReportsTheDisplayedSize();
     void probeReadsStreamedWebmAndSkipsCoverArt();
+    void probeRunsOffTheUiThread();
     void thumbProviderServesAndCachesFrames();
     void thumbProviderStopsBlockedJobs();
     void exportDialogDelegatesSuggestedUrl();
@@ -254,6 +259,8 @@ private:
     QString makeVideo(const QString &name, double duration, bool audio,
                       const QString &size = QStringLiteral("32x32"));
     void waitForBackgroundWork(Backend &backend);
+    // Probing finishes in the background now: wait until it has settled.
+    void waitForProbe(Backend &backend);
     bool installBrokenFfmpeg(const QString &dirPath);
 
     QTemporaryDir m_dir;
@@ -274,6 +281,10 @@ void BackendTests::initTestCase() {
 void BackendTests::waitForBackgroundWork(Backend &backend) {
     QTRY_VERIFY_WITH_TIMEOUT(backend.status().isEmpty(), 10000);
     QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+}
+
+void BackendTests::waitForProbe(Backend &backend) {
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 10000);
 }
 
 QString BackendTests::formatName(const QString &path) const {
@@ -329,7 +340,7 @@ void BackendTests::pickerSelectionLoadsVideo() {
 
     emit picker->openSelected(videoUrl());
 
-    QCOMPARE(infoSpy.count(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(infoSpy.count(), 1, 10000);
     QCOMPARE(backend.source(), videoUrl());
     QVERIFY(backend.timeline()->duration() > 0);
     waitForBackgroundWork(backend);
@@ -361,7 +372,7 @@ void BackendTests::addingAVideoInsertsItAfterThePlayheadsClip() {
     // Before anything is open, adding a video just opens it.
     backend.addVideoDialog(0.0);
     emit picker->openSelected(videoUrl());
-    QCOMPARE(backend.source(), videoUrl());
+    QTRY_COMPARE_WITH_TIMEOUT(backend.source(), videoUrl(), 10000);
     QCOMPARE(backend.timeline()->clips(), wholeVideo(1.0));
 
     // After that, the add dialog's choice lands after the clip under the
@@ -369,20 +380,22 @@ void BackendTests::addingAVideoInsertsItAfterThePlayheadsClip() {
     backend.addVideoDialog(0.5);
     QCOMPARE(picker->openCount, 2);
     emit picker->openSelected(QUrl::fromLocalFile(second));
-    QCOMPARE(backend.videoList().size(), 2);
+    QTRY_COMPARE_WITH_TIMEOUT(backend.videoList().size(), 2, 10000);
     QCOMPARE(backend.timeline()->clips(), (edit::Clips{{0, 0.0, 1.0}, {1, 0.0, 2.0}}));
     QVERIFY(backend.timeline()->unexported());
     QCOMPARE(videosSpy.count(), 2);
 
     backend.openVideoDialog();
     emit picker->openSelected(QUrl::fromLocalFile(second));
-    QCOMPARE(backend.source(), QUrl::fromLocalFile(second));
+    QTRY_COMPARE_WITH_TIMEOUT(backend.source(), QUrl::fromLocalFile(second), 10000);
     QCOMPARE(backend.timeline()->clips(), wholeVideo(2.0));
 
-    // A video that can't be read changes nothing.
+    // A video that can't be read changes nothing: accepted, then refused
+    // by the background probe.
     QSignalSpy errorSpy(&backend, &Backend::loadError);
-    QVERIFY(!backend.addVideo(QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("missing.mp4"))), 0.0));
-    QCOMPARE(errorSpy.count(), 1);
+    QVERIFY(backend.addVideo(QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("missing.mp4"))), 0.0));
+    QTRY_COMPARE_WITH_TIMEOUT(errorSpy.count(), 1, 10000);
+    waitForProbe(backend);
     QCOMPARE(backend.timeline()->clips(), wholeVideo(2.0));
 }
 
@@ -504,6 +517,40 @@ void BackendTests::probeReadsStreamedWebmAndSkipsCoverArt() {
     QVERIFY(!ffmpeg::probe(cover).ok);
 }
 
+void BackendTests::probeRunsOffTheUiThread() {
+    // A slow ffprobe (a streamed file with no header duration is the real
+    // case) must not freeze the caller: load() accepts, busy() reports the
+    // probe in flight, and the refusal arrives later as a signal.
+    const QString sleepBin = QStandardPaths::findExecutable(QStringLiteral("sleep"));
+    QVERIFY2(!sleepBin.isEmpty(), "sleep is available");
+    QTemporaryDir pathDir;
+    QVERIFY(pathDir.isValid());
+    const QString fakeFfprobe = pathDir.filePath(QStringLiteral("ffprobe"));
+    QFile fake(fakeFfprobe);
+    QVERIFY(fake.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    fake.write(QStringLiteral("#!/bin/sh\nexec \"%1\" 2\n").arg(sleepBin).toUtf8());
+    fake.close();
+    QVERIFY(fake.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner
+                                | QFileDevice::ExeOwner));
+    EnvVarGuard pathGuard("PATH");
+    qputenv("PATH", QFile::encodeName(pathDir.path()));
+
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    QSignalSpy errorSpy(&backend, &Backend::loadError);
+
+    QElapsedTimer elapsed;
+    elapsed.start();
+    QVERIFY(backend.load(videoUrl()));
+    QVERIFY2(elapsed.elapsed() < 1000, "load() blocked on ffprobe");
+    QVERIFY(backend.busy());
+    QVERIFY(backend.source().isEmpty());
+
+    QTRY_COMPARE_WITH_TIMEOUT(errorSpy.count(), 1, 10000);
+    waitForProbe(backend);
+    QVERIFY(backend.source().isEmpty());
+}
+
 void BackendTests::thumbProviderServesAndCachesFrames() {
     ThumbProvider provider;
     provider.setVideo(7, m_videoPath);
@@ -563,6 +610,7 @@ void BackendTests::exportDialogDelegatesSuggestedUrl() {
     Backend backend(&provider, picker);
 
     QVERIFY(backend.load(videoUrl()));
+    waitForProbe(backend);
     waitForBackgroundWork(backend);
     backend.exportDialog();
 
@@ -580,6 +628,7 @@ void BackendTests::suggestedExportUrlAlwaysUsesMp4() {
     Backend backend(&provider, picker);
 
     QVERIFY(backend.load(QUrl::fromLocalFile(renamedSource)));
+    waitForProbe(backend);
     waitForBackgroundWork(backend);
 
     QCOMPARE(backend.suggestedExportUrl(),
@@ -592,6 +641,7 @@ void BackendTests::saveFrameWritesPngBesideTheSource() {
     QSignalSpy savedSpy(&backend, &Backend::frameSaved);
     QSignalSpy failedSpy(&backend, &Backend::frameFailed);
     QVERIFY(backend.load(videoUrl()));
+    waitForProbe(backend);
 
     // Written in the background, a lossless full-size PNG.
     backend.saveFrame(0.0);
@@ -655,6 +705,7 @@ void BackendTests::saveFrameTakesTheFrameOnScreen() {
         QSignalSpy savedSpy(&backend, &Backend::frameSaved);
         QSignalSpy failedSpy(&backend, &Backend::frameFailed);
         QVERIFY(backend.load(QUrl::fromLocalFile(path)));
+        waitForProbe(backend);
         backend.saveFrame(4.35);
         QTRY_VERIFY_WITH_TIMEOUT(savedSpy.count() + failedSpy.count() > 0, 10000);
         QVERIFY2(failedSpy.isEmpty(), qPrintable(name + ": " + failedSpy.value(0).value(0).toString()));
@@ -694,6 +745,7 @@ void BackendTests::saveFrameSquaresStretchedPixels() {
     Backend backend(&provider, new FakeFilePicker);
     QSignalSpy savedSpy(&backend, &Backend::frameSaved);
     QVERIFY(backend.load(QUrl::fromLocalFile(path)));
+    waitForProbe(backend);
     backend.saveFrame(0.0);
     QTRY_COMPARE_WITH_TIMEOUT(savedSpy.count(), 1, 10000);
     QCOMPARE(QImage(savedSpy.first().at(0).toString()).size(), QSize(53, 30));
@@ -711,6 +763,7 @@ void BackendTests::exportClipWritesMp4() {
     });
 
     QVERIFY(backend.load(videoUrl()));
+    waitForProbe(backend);
     waitForBackgroundWork(backend);
 
     const QString selectedPath = m_dir.filePath(QStringLiteral("actual-export.webm"));
@@ -761,6 +814,7 @@ void BackendTests::exportOddSizedWebmWritesEvenMp4() {
     QSignalSpy failedSpy(&backend, &Backend::exportFailed);
 
     QVERIFY(backend.load(QUrl::fromLocalFile(oddWebm)));
+    waitForProbe(backend);
     waitForBackgroundWork(backend);
 
     const QString outPath = m_dir.filePath(QStringLiteral("odd-region-exported.mp4"));
@@ -802,6 +856,7 @@ void BackendTests::exportSkipsClipsWhoseVideoIsGone() {
     QSignalSpy failedSpy(&backend, &Backend::exportFailed);
 
     QVERIFY(backend.load(videoUrl()));
+    waitForProbe(backend);
     waitForBackgroundWork(backend);
 
     // Clips from a dialog opened on a project with more videos than this one.
@@ -820,6 +875,7 @@ void BackendTests::exportBlocksOpeningVideos() {
     QSignalSpy failedSpy(&backend, &Backend::exportFailed);
 
     QVERIFY(backend.load(videoUrl()));
+    waitForProbe(backend);
     waitForBackgroundWork(backend);
     backend.exportClips(QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("blocking.mp4"))), wholeVideo(1.0));
     QVERIFY(backend.busy());
@@ -833,6 +889,7 @@ void BackendTests::exportBlocksOpeningVideos() {
     QTRY_VERIFY_WITH_TIMEOUT(doneSpy.count() + failedSpy.count() > 0, 20000);
     QCOMPARE(failedSpy.count(), 0);
     QVERIFY(backend.addVideo(videoUrl(), 0.0));
+    waitForProbe(backend);
 }
 
 void BackendTests::exportKeepsOnlyTheClipsFromTheDialog() {
@@ -846,6 +903,7 @@ void BackendTests::exportKeepsOnlyTheClipsFromTheDialog() {
     QSignalSpy failedSpy(&backend, &Backend::exportFailed);
 
     QVERIFY(backend.load(QUrl::fromLocalFile(sourcePath)));
+    waitForProbe(backend);
     waitForBackgroundWork(backend);
 
     // Cut the middle second out: 0..1 and 2..3 survive.
@@ -890,7 +948,9 @@ void BackendTests::exportJoinsDifferentVideos() {
     QSignalSpy failedSpy(&backend, &Backend::exportFailed);
 
     QVERIFY(backend.load(QUrl::fromLocalFile(first)));
+    waitForProbe(backend);
     QVERIFY(backend.addVideo(QUrl::fromLocalFile(second), 0.0));
+    waitForProbe(backend);
     // The silent portrait video first, then a second of the first video.
     Timeline *timeline = backend.timeline();
     timeline->moveClip(1, 0);
@@ -922,6 +982,7 @@ void BackendTests::exportClipCanReplaceSourceFile() {
     QSignalSpy failedSpy(&backend, &Backend::exportFailed);
 
     QVERIFY(backend.load(QUrl::fromLocalFile(sourcePath)));
+    waitForProbe(backend);
     waitForBackgroundWork(backend);
 
     backend.exportClips(QUrl::fromLocalFile(sourcePath), wholeVideo(1.0));
@@ -950,6 +1011,7 @@ void BackendTests::exportOverASourceStartsOverFromTheSavedFile() {
     QSignalSpy failedSpy(&backend, &Backend::exportFailed);
 
     QVERIFY(backend.load(QUrl::fromLocalFile(sourcePath)));
+    waitForProbe(backend);
     waitForBackgroundWork(backend);
     Timeline *timeline = backend.timeline();
     timeline->split(1.0);
@@ -963,6 +1025,7 @@ void BackendTests::exportOverASourceStartsOverFromTheSavedFile() {
 
     // The old 1..2 clip is gone with the old file: the project is the saved
     // second now, whole and already exported.
+    waitForProbe(backend);
     QCOMPARE(timeline->clips().size(), 1);
     QCOMPARE(timeline->clips().first().in, 0.0);
     QVERIFY2(qAbs(timeline->duration() - 1.0) < 0.15, qPrintable(QString::number(timeline->duration())));
@@ -978,6 +1041,7 @@ void BackendTests::exportZeroLengthClipFails() {
     QSignalSpy failedSpy(&backend, &Backend::exportFailed);
 
     QVERIFY(backend.load(videoUrl()));
+    waitForProbe(backend);
     waitForBackgroundWork(backend);
 
     const QString outPath = m_dir.filePath(QStringLiteral("empty-range.mp4"));
@@ -997,6 +1061,7 @@ void BackendTests::exportRefusesRewrittenPathOverExistingFile() {
     QSignalSpy failedSpy(&backend, &Backend::exportFailed);
 
     QVERIFY(backend.load(videoUrl()));
+    waitForProbe(backend);
     waitForBackgroundWork(backend);
 
     // The dialog confirmed "rewrite-target.webm"; forcing the .mp4 suffix
@@ -1029,6 +1094,7 @@ void BackendTests::exportStartFailureClearsBusy() {
     QSignalSpy failedSpy(&backend, &Backend::exportFailed);
 
     QVERIFY(backend.load(videoUrl()));
+    waitForProbe(backend);
     waitForBackgroundWork(backend);
 
     QTemporaryDir pathDir;
@@ -1055,6 +1121,7 @@ void BackendTests::failedExportPreservesExistingFile() {
     QSignalSpy failedSpy(&backend, &Backend::exportFailed);
 
     QVERIFY(backend.load(videoUrl()));
+    waitForProbe(backend);
     waitForBackgroundWork(backend);
 
     // A pre-existing destination file that a failed export must not clobber.
@@ -1853,6 +1920,7 @@ void BackendTests::qmlDropOpensThenAddsVideos() {
 
     // Into an empty window, a drop opens the video, saying what it skipped.
     QVERIFY(dropUrls(window, {QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("missing-first.mp4"))), videoUrl()}));
+    waitForProbe(backend);
     QCOMPARE(window->property("noticeText").toString(), QStringLiteral("Skipped a file that won't open."));
     QCOMPARE(backend.source(), videoUrl());
     QCOMPARE(timeline->clips(), wholeVideo(1.0));
@@ -1860,16 +1928,18 @@ void BackendTests::qmlDropOpensThenAddsVideos() {
     // After that, drops join the edit after the clip under the playhead, in
     // order, and one undo takes each back out.
     QVERIFY(dropUrls(window, {QUrl::fromLocalFile(second), QUrl::fromLocalFile(third)}));
+    waitForProbe(backend);
     QCOMPARE(backend.source(), videoUrl());
     QCOMPARE(timeline->clips(), (edit::Clips{{0, 0.0, 1.0}, {1, 0.0, 2.0}, {2, 0.0, 3.0}}));
     QVERIFY(timeline->unexported());
     timeline->undo();
     QCOMPARE(timeline->clips(), (edit::Clips{{0, 0.0, 1.0}, {1, 0.0, 2.0}}));
 
-    // A file that won't open adds nothing, and says so.
+    // A file that won't open adds nothing, and says so. The drop is taken
+    // before the probe knows; the refusal arrives in the background.
     QSignalSpy errors(&backend, &Backend::loadError);
-    QVERIFY(!dropUrls(window, {QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("missing.mp4")))}));
-    QCOMPARE(errors.count(), 1);
+    QVERIFY(dropUrls(window, {QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("missing.mp4")))}));
+    QTRY_COMPARE_WITH_TIMEOUT(errors.count(), 1, 10000);
     QCOMPARE(timeline->clips().size(), 2);
 }
 
@@ -1880,6 +1950,7 @@ void BackendTests::qmlDropLandsAfterThePlayheadsClip() {
     ThumbProvider provider;
     Backend backend(&provider, new FakeFilePicker);
     QVERIFY(backend.load(videoUrl()));
+    waitForProbe(backend);
     Timeline *timeline = backend.timeline();
     timeline->split(0.5);
     QmlHarness harness(backend);
@@ -1894,6 +1965,7 @@ void BackendTests::qmlDropLandsAfterThePlayheadsClip() {
     QVERIFY(dropUrls(window, {QUrl::fromLocalFile(second),
                               QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("missing.mp4"))),
                               QUrl::fromLocalFile(third)}));
+    waitForProbe(backend);
     QCOMPARE(errors.count(), 1);
     QCOMPARE(timeline->clips(), (edit::Clips{{0, 0.0, 0.5}, {1, 0.0, 2.0}, {2, 0.0, 3.0}, {0, 0.5, 1.0}}));
     QCOMPARE(window->property("noticeText").toString(), QStringLiteral("Skipped a file that won't open."));
@@ -1915,6 +1987,7 @@ void BackendTests::qmlDropTakesOnlyLocalFiles() {
 
     // Not while exporting: the export would mark the new edit as exported.
     QVERIFY(backend.load(videoUrl()));
+    waitForProbe(backend);
     backend.exportClips(QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("drop-busy.mp4"))), wholeVideo(1.0));
     QVERIFY(backend.busy());
     QVERIFY(!dropUrls(window, {videoUrl()}));

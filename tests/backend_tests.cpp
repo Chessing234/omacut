@@ -205,6 +205,7 @@ private slots:
     void probeRunsOffTheUiThread();
     void thumbProviderServesAndCachesFrames();
     void thumbProviderStopsBlockedJobs();
+    void thumbProviderCancelsRunningJobs();
     void exportDialogDelegatesSuggestedUrl();
     void suggestedExportUrlAlwaysUsesMp4();
     void exportClipWritesMp4();
@@ -604,6 +605,40 @@ void BackendTests::thumbProviderStopsBlockedJobs() {
     provider.reset();
     QVERIFY2(elapsed.elapsed() < 1500,
              qPrintable(QStringLiteral("stopping took %1 ms").arg(elapsed.elapsed())));
+}
+
+void BackendTests::thumbProviderCancelsRunningJobs() {
+    const QString sleepBin = QStandardPaths::findExecutable(QStringLiteral("sleep"));
+    QVERIFY2(!sleepBin.isEmpty(), "sleep is available");
+
+    QTemporaryDir pathDir;
+    QVERIFY(pathDir.isValid());
+    const QString fakeFfmpeg = pathDir.filePath(QStringLiteral("ffmpeg"));
+    QFile fake(fakeFfmpeg);
+    QVERIFY(fake.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    fake.write(QStringLiteral("#!/bin/sh\nexec \"%1\" 30\n").arg(sleepBin).toUtf8());
+    fake.close();
+    QVERIFY(fake.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner
+                                | QFileDevice::ExeOwner));
+
+    EnvVarGuard pathGuard("PATH");
+    qputenv("PATH", QFile::encodeName(pathDir.path()));
+
+    // Cancelling a frame that scrolled off screen kills its ffmpeg instead
+    // of leaving the worker busy until the extraction would have finished.
+    ThumbProvider provider;
+    provider.setVideo(1, QStringLiteral("unused.mp4"));
+    std::unique_ptr<QQuickImageResponse> response(
+        provider.requestImageResponse(QStringLiteral("1/0"), QSize()));
+    QSignalSpy finishedSpy(response.get(), &QQuickImageResponse::finished);
+    QTest::qWait(100);
+
+    QElapsedTimer elapsed;
+    elapsed.start();
+    response->cancel();
+    QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 5000);
+    QVERIFY2(elapsed.elapsed() < 1500,
+             qPrintable(QStringLiteral("cancelling took %1 ms").arg(elapsed.elapsed())));
 }
 
 void BackendTests::exportDialogDelegatesSuggestedUrl() {

@@ -219,6 +219,8 @@ private slots:
     void qmlBracketsJumpBetweenClipEdges();
     void qmlKeysMoveAndAddClips();
     void qmlZoomFocusesTheClip();
+    void qmlPressingHandleScrubsItsFrame();
+    void formatTimeShowsHoursFromSixtyMinutes();
     void qmlDropOpensThenAddsVideos();
     void qmlDropTakesOnlyLocalFiles();
     void qmlDropLandsAfterThePlayheadsClip();
@@ -1246,6 +1248,76 @@ void BackendTests::qmlZoomFocusesTheClip() {
     // Untouched since the last zoom, so Z now zooms back out to the whole edit.
     QTest::keyClick(window, Qt::Key_Z);
     QTRY_COMPARE_WITH_TIMEOUT(editBar->property("zoomed").toBool(), false, 3000);
+
+    // If edits shrink the sequence past viewStartSec, zoom resets so the
+    // remaining clips don't sit entirely off-screen to the left.
+    QTest::keyClick(window, Qt::Key_Z);
+    QTRY_COMPARE_WITH_TIMEOUT(editBar->property("zoomed").toBool(), true, 3000);
+    QCOMPARE(editBar->property("viewStartSec").toDouble(), 4.375);
+    backend.timeline.removeClip(2);
+    backend.timeline.removeClip(1);
+    backend.timeline.setClip(0, 0.0, 4.0);
+    QTRY_COMPARE_WITH_TIMEOUT(editBar->property("zoomed").toBool(), false, 3000);
+}
+
+void BackendTests::qmlPressingHandleScrubsItsFrame() {
+    ShortcutBackend backend(placeholderUrl(m_dir), 20.0);
+    QmlHarness harness(backend);
+    QQuickWindow *window = showEditor(harness, backend);
+    QVERIFY2(window, qPrintable(mainQmlPath()));
+    QQuickItem *editBar = harness.editBar();
+    QVERIFY(editBar);
+
+    backend.timeline.setClip(0, 3.0, 15.0);
+    QTest::qWait(50);
+
+    QSignalSpy scrubClipSpy(editBar, SIGNAL(scrubClip(int,double)));
+    QVERIFY(scrubClipSpy.isValid());
+
+    // Pressing the leading handle immediately previews the clip's in-point.
+    const QPoint leftHandle = editBar->mapToScene(QPointF(5.0, editBar->height() / 2.0)).toPoint();
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, leftHandle);
+    QCOMPARE(scrubClipSpy.count(), 1);
+    QCOMPARE(scrubClipSpy.first().at(0).toInt(), 0);
+    QCOMPARE(scrubClipSpy.first().at(1).toDouble(), 3.0);
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, leftHandle);
+
+    // Pressing the trailing handle immediately previews the clip's out-point.
+    const QPoint rightHandle = editBar->mapToScene(QPointF(editBar->width() - 5.0, editBar->height() / 2.0)).toPoint();
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, rightHandle);
+    QCOMPARE(scrubClipSpy.count(), 2);
+    QCOMPARE(scrubClipSpy.last().at(0).toInt(), 0);
+    QCOMPARE(scrubClipSpy.last().at(1).toDouble(), 14.999);
+
+    // Dragging it keeps showing the clip's last frame, not the moment past it.
+    QTest::mouseMove(window, rightHandle - QPoint(40, 0));
+    QTRY_VERIFY_WITH_TIMEOUT(scrubClipSpy.count() > 2, 3000);
+    const double out = backend.timeline.clips().first().out;
+    QVERIFY(out < 15.0);
+    QCOMPARE(scrubClipSpy.last().at(1).toDouble(), out - 0.001);
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, rightHandle - QPoint(40, 0));
+}
+
+void BackendTests::formatTimeShowsHoursFromSixtyMinutes() {
+    QJSEngine engine;
+    const QString formatPath = QFileInfo(QString::fromUtf8(__FILE__)).dir().absoluteFilePath(
+        QStringLiteral("../src/Format.js"));
+    QFile file(formatPath);
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    QString script = QString::fromUtf8(file.readAll());
+    script.remove(QStringLiteral(".pragma library"));
+    QVERIFY(!engine.evaluate(script).isError());
+    QJSValue fmt = engine.globalObject().property(QStringLiteral("fmt"));
+    QVERIFY(fmt.isCallable());
+
+    const auto callFmt = [&fmt](double s) {
+        return fmt.call({QJSValue(s)}).toString();
+    };
+    QCOMPARE(callFmt(0.0), QStringLiteral("00:00.00"));
+    QCOMPARE(callFmt(59.999), QStringLiteral("01:00.00"));
+    QCOMPARE(callFmt(3599.99), QStringLiteral("59:59.99"));
+    QCOMPARE(callFmt(3599.999), QStringLiteral("01:00:00.00"));
+    QCOMPARE(callFmt(3661.25), QStringLiteral("01:01:01.25"));
 }
 
 void BackendTests::qmlQuitConfirmsUnexportedEdit() {

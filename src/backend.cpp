@@ -4,7 +4,11 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QProcess>
+#include <QSaveFile>
 #include <QTextStream>
 #include <QVariantMap>
 
@@ -62,6 +66,7 @@ Backend::Backend(ThumbProvider *provider, FilePicker *filePicker, QObject *paren
         loadThemeAccent();
     };
     connect(&m_themeWatcher, &QFileSystemWatcher::directoryChanged, this, themeChanged);
+    connect(&m_timeline, &Timeline::changed, this, &Backend::saveSidecar);
     connect(&m_themeWatcher, &QFileSystemWatcher::fileChanged, this, themeChanged);
     watchTheme();
     loadThemeAccent();
@@ -214,8 +219,16 @@ bool Backend::load(const QUrl &url) {
     if (!probeVideo(url, &video))
         return false;
 
+    QByteArray savedEdit;
+    QFile sidecar(sidecarPath(video.info.path));
+    if (sidecar.open(QIODevice::ReadOnly))
+        savedEdit = sidecar.readAll();
+
     m_videos = {video};
     m_timeline.reset(video.info.duration);
+    edit::Clips restored;
+    if (clipsFromSidecar(savedEdit, video.info.path, video.info.duration, &restored))
+        m_timeline.replace(restored);
     emit videosChanged();
     emit infoChanged();
     return true;
@@ -265,6 +278,62 @@ QList<int> Backend::exportHeights(int width, int height) {
             heights << candidate;
     }
     return heights;
+}
+
+QString Backend::sidecarPath(const QString &videoPath) {
+    const QFileInfo file(videoPath);
+    return file.dir().filePath(file.completeBaseName() + QStringLiteral(".omacut.json"));
+}
+
+QByteArray Backend::sidecarJson(const QString &source, const edit::Clips &clips) {
+    QJsonArray stored;
+    for (const edit::Clip &clip : clips) {
+        stored.append(QJsonObject{{QStringLiteral("source"), clip.source},
+                                  {QStringLiteral("in"), clip.in},
+                                  {QStringLiteral("out"), clip.out}});
+    }
+    const QJsonObject root{{QStringLiteral("version"), 1},
+                           {QStringLiteral("source"), source},
+                           {QStringLiteral("clips"), stored}};
+    return QJsonDocument(root).toJson(QJsonDocument::Compact);
+}
+
+bool Backend::clipsFromSidecar(const QByteArray &data, const QString &source, double duration,
+                               edit::Clips *clips) {
+    const QJsonObject root = QJsonDocument::fromJson(data).object();
+    if (root.value(QStringLiteral("version")).toInt() != 1
+            || root.value(QStringLiteral("source")).toString() != source)
+        return false;
+    edit::Clips parsed;
+    for (const QJsonValue &value : root.value(QStringLiteral("clips")).toArray()) {
+        const QJsonObject clip = value.toObject();
+        if (clip.value(QStringLiteral("source")).toInt() != 0)
+            return false;
+        const double in = clip.value(QStringLiteral("in")).toDouble();
+        const double out = clip.value(QStringLiteral("out")).toDouble();
+        if (!(out - in >= edit::minimumClip) || in < 0 || out > duration + 0.001)
+            return false;
+        parsed.append({0, in, out});
+    }
+    if (parsed.isEmpty())
+        return false;
+    *clips = parsed;
+    return true;
+}
+
+void Backend::saveSidecar() {
+    if (m_videos.size() != 1)
+        return;
+    const QString path = sidecarPath(m_videos.first().info.path);
+    if (!m_timeline.unexported()) {
+        QFile::remove(path);
+        return;
+    }
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly))
+        return;
+    file.write(sidecarJson(m_videos.first().info.path, m_timeline.clips()));
+    file.commit();
 }
 
 QUrl Backend::suggestedExportUrl() const {

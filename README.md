@@ -37,7 +37,7 @@ Handles catch on neighbouring clip edges and the playhead.
 - *Ctrl+O*: Open a new file to edit.
 - *Ctrl+Shift+O*: Add a video after the clip under the playhead.
 - *Ctrl+S*: Export the current edit.
-- *Q*: Quit (asks first if the edit hasn't been exported).
+- *Q*: Quit (asks first if the edit hasn't been exported). A one-video edit is also written beside the file as `<name>.omacut.json`, and opening that video again restores the cut. Exporting, or trimming back to the whole video, removes the file.
 - *?*: Show the hotkeys in the app.
 
 ## Install

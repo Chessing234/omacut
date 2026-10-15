@@ -31,6 +31,9 @@ public:
 
     // A freshly loaded video: one clip spanning all of it, and no history.
     void reset(double duration);
+    // Replace the clips without recording an undo step. Used when a saved edit
+    // is loaded back. Empty input is ignored.
+    void replace(const edit::Clips &clips);
     // Adds a video of the given length as a clip after the one under t (at
     // the end past the last), as an undoable edit. Returns its source index.
     int addSource(double duration, double t);

@@ -34,6 +34,16 @@ void Timeline::reset(double duration) {
     emit changed();
 }
 
+void Timeline::replace(const edit::Clips &clips) {
+    if (clips.isEmpty())
+        return;
+    m_clips = clips;
+    m_undo.clear();
+    m_redo.clear();
+    m_gesture = false;
+    emit changed();
+}
+
 int Timeline::addSource(double duration, double t) {
     m_sourceDurations.append(std::max(0.0, duration));
     const int source = m_sourceDurations.size() - 1;

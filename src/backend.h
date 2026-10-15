@@ -69,6 +69,13 @@ public:
     // below the source's shorter side, so exports never upscale.
     static QList<int> exportHeights(int width, int height);
 
+    // A one-video edit is written beside the file as `<name>.omacut.json` so
+    // quitting does not throw the cut away. A full, uncut video removes it.
+    static QString sidecarPath(const QString &videoPath);
+    static QByteArray sidecarJson(const QString &source, const edit::Clips &clips);
+    static bool clipsFromSidecar(const QByteArray &data, const QString &source,
+                                 double duration, edit::Clips *clips);
+
 signals:
     void infoChanged();
     void videosChanged();
@@ -85,6 +92,7 @@ private:
     void failExport(const QString &tmpPath, const QString &message);
     void wireFilePicker();
     void loadThemeAccent();
+    void saveSidecar();
     void watchTheme();
 
     struct Video {

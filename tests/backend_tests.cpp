@@ -224,6 +224,7 @@ private slots:
     void timelineSplitsTrimsAndJoins();
     void timelineUndoesAGestureAsOneStep();
     void timelineTracksUnexportedCuts();
+    void sidecarRoundTripsASingleVideoEdit();
     void timelineAddsAndMovesVideos();
     void timelineAnswersWhereTimesFall();
     void timelineEditsAtATime();
@@ -1310,6 +1311,20 @@ void BackendTests::timelineTracksUnexportedCuts() {
     timeline.undo();
     timeline.redo();
     QVERIFY(!timeline.unexported());
+}
+
+void BackendTests::sidecarRoundTripsASingleVideoEdit() {
+    const QString source = QStringLiteral("/tmp/clip.mp4");
+    edit::Clips clips{{0, 1.0, 4.0}, {0, 6.0, 8.0}};
+    edit::Clips restored;
+    QVERIFY(Backend::clipsFromSidecar(Backend::sidecarJson(source, clips), source, 10.0, &restored));
+    QCOMPARE(restored, clips);
+
+    QVERIFY(!Backend::clipsFromSidecar(Backend::sidecarJson(QStringLiteral("/other.mp4"), clips),
+                                       source, 10.0, &restored));
+    edit::Clips tooLong{{0, 0.0, 50.0}};
+    QVERIFY(!Backend::clipsFromSidecar(Backend::sidecarJson(source, tooLong), source, 10.0, &restored));
+    QCOMPARE(Backend::sidecarPath(source), QStringLiteral("/tmp/clip.omacut.json"));
 }
 
 void BackendTests::timelineAnswersWhereTimesFall() {

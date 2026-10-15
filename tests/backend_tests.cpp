@@ -1,5 +1,9 @@
 #include <QtTest>
 
+#include <QDBusConnection>
+#include <QDBusContext>
+#include <QDBusMessage>
+#include <QDBusObjectPath>
 #include <QDir>
 #include <QDragEnterEvent>
 #include <QDragLeaveEvent>
@@ -23,7 +27,61 @@
 
 #include "backend.h"
 #include "filepicker.h"
+#include "portalfilepicker.h"
 #include "thumbprovider.h"
+
+// A fake org.freedesktop.portal.Request: only Close() matters here.
+class FakePortalRequest : public QObject {
+    Q_OBJECT
+    Q_CLASSINFO("D-Bus Interface", "org.freedesktop.portal.Request")
+
+public:
+    int *closeCounter = nullptr;
+
+public slots:
+    void Close() {
+        if (closeCounter)
+            ++*closeCounter;
+    }
+};
+
+// A fake org.freedesktop.portal.Desktop whose FileChooser hands back a
+// request path and then never answers, like a portal that died mid-dialog.
+class FakePortalService : public QObject, protected QDBusContext {
+    Q_OBJECT
+    Q_CLASSINFO("D-Bus Interface", "org.freedesktop.portal.FileChooser")
+
+public:
+    int openCalls = 0;
+    int closeCalls = 0;
+    QString currentPath;
+
+    void respondWith(const QString &uri) {
+        QVariantMap results;
+        results.insert(QStringLiteral("uris"), QStringList{uri});
+        QDBusMessage msg = QDBusMessage::createSignal(
+            currentPath, QStringLiteral("org.freedesktop.portal.Request"),
+            QStringLiteral("Response"));
+        msg << 0u << results;
+        QDBusConnection::sessionBus().send(msg);
+    }
+
+public slots:
+    QDBusObjectPath OpenFile(const QString &, const QString &, const QVariantMap &options) {
+        ++openCalls;
+        const QString token = options.value(QStringLiteral("handle_token")).toString();
+        QString sender = message().service().mid(1);
+        sender.replace(QLatin1Char('.'), QLatin1Char('_'));
+        currentPath = QStringLiteral("/org/freedesktop/portal/desktop/request/%1/%2")
+                          .arg(sender, token);
+        auto *request = new FakePortalRequest;
+        request->closeCounter = &closeCalls;
+        request->setParent(this);
+        QDBusConnection::sessionBus().registerObject(
+            currentPath, request, QDBusConnection::ExportAllSlots);
+        return QDBusObjectPath(currentPath);
+    }
+};
 
 class FakeFilePicker : public FilePicker {
     Q_OBJECT
@@ -254,6 +312,7 @@ private slots:
     void exportHeightsNeverUpscale();
     void themeAccentReadsOmarchyColors();
     void themeAccentForegroundKeepsContrast();
+    void portalPickerReplacesAnUnansweredRequest();
 
 private:
     QUrl videoUrl() const { return QUrl::fromLocalFile(m_videoPath); }
@@ -2107,6 +2166,95 @@ void BackendTests::qmlDropTakesOnlyLocalFiles() {
     QVERIFY(!dropUrls(window, {videoUrl()}));
     QCOMPARE(backend.timeline()->clips(), wholeVideo(1.0));
     QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 20000);
+}
+
+void BackendTests::portalPickerReplacesAnUnansweredRequest() {
+    // The picker talks to whatever DBUS_SESSION_BUS_ADDRESS named when this
+    // process first touched the session bus, and by the time a test runs
+    // that is the real bus, where a real portal owns the name. So the
+    // parent invocation starts a private daemon with no service
+    // activation (nothing real can claim the name there) and re-runs just
+    // this test in a child born on that bus.
+    if (!qEnvironmentVariableIsSet("OMACUT_PORTAL_TEST_CHILD")) {
+        const QString dbusDaemon = QStandardPaths::findExecutable(QStringLiteral("dbus-daemon"));
+        if (dbusDaemon.isEmpty())
+            QSKIP("dbus-daemon is not available");
+
+        QTemporaryDir busDir;
+        QVERIFY(busDir.isValid());
+        const QString socketPath = busDir.filePath(QStringLiteral("bus.sock"));
+        {
+            QFile conf(busDir.filePath(QStringLiteral("bus.conf")));
+            QVERIFY(conf.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            conf.write(QStringLiteral(
+                "<!DOCTYPE busconfig PUBLIC \"-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN\" "
+                "\"http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd\">\n"
+                "<busconfig><type>session</type>"
+                "<listen>unix:path=%1</listen><auth>EXTERNAL</auth>"
+                "<policy context=\"default\"><allow user=\"*\"/><allow own=\"*\"/>"
+                "<allow send_destination=\"*\" eavesdrop=\"true\"/>"
+                "<allow receive_sender=\"*\" eavesdrop=\"true\"/>"
+                "<allow send_requested_reply=\"true\" send_type=\"method_return\"/>"
+                "<allow send_requested_reply=\"true\" send_type=\"error\"/>"
+                "<allow receive_requested_reply=\"true\"/></policy></busconfig>\n")
+                           .arg(socketPath)
+                           .toUtf8());
+        }
+        QProcess daemon;
+        daemon.start(dbusDaemon, {QStringLiteral("--config-file"),
+                                  busDir.filePath(QStringLiteral("bus.conf")),
+                                  QStringLiteral("--fork"), QStringLiteral("--print-pid=1")});
+        QVERIFY(daemon.waitForFinished(10000));
+        const int daemonPid = QString::fromUtf8(daemon.readAllStandardOutput()).trimmed().toInt();
+        QVERIFY(daemonPid > 0);
+
+        QProcess child;
+        QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+        env.insert(QStringLiteral("DBUS_SESSION_BUS_ADDRESS"),
+                   QStringLiteral("unix:path=") + socketPath);
+        env.insert(QStringLiteral("OMACUT_PORTAL_TEST_CHILD"), QStringLiteral("1"));
+        child.setProcessEnvironment(env);
+        child.start(QCoreApplication::applicationFilePath(),
+                    {QStringLiteral("portalPickerReplacesAnUnansweredRequest")});
+        const bool finished = child.waitForFinished(60000);
+        const QByteArray childOut = child.readAll();
+        QProcess::execute(QStringLiteral("kill"), {QString::number(daemonPid)});
+        QVERIFY2(finished, qPrintable(QString::fromUtf8(childOut)));
+        QVERIFY2(child.exitCode() == 0, qPrintable(QString::fromUtf8(childOut)));
+        return;
+    }
+
+    QVERIFY(QDBusConnection::sessionBus().isConnected());
+    FakePortalService portal;
+    QVERIFY(QDBusConnection::sessionBus().registerService(
+        QStringLiteral("org.freedesktop.portal.Desktop")));
+    QDBusConnection::sessionBus().registerObject(
+        QStringLiteral("/org/freedesktop/portal/desktop"), &portal,
+        QDBusConnection::ExportAllSlots);
+
+    PortalFilePicker picker;
+    QSignalSpy openSpy(&picker, &FilePicker::openSelected);
+    QSignalSpy failedSpy(&picker, &FilePicker::failed);
+
+    // The first request is never answered, as if the portal died with the
+    // dialog up. Asking again must close it and open a fresh dialog
+    // instead of dropping the request on the floor.
+    picker.openVideo();
+    QTRY_COMPARE_WITH_TIMEOUT(portal.openCalls, 1, 5000);
+    picker.openVideo();
+    QTRY_COMPARE_WITH_TIMEOUT(portal.openCalls, 2, 5000);
+    QTRY_COMPARE_WITH_TIMEOUT(portal.closeCalls, 1, 5000);
+    QCOMPARE(failedSpy.count(), 0);
+
+    // The replacement dialog's answer is picked up normally.
+    portal.respondWith(videoUrl().toString());
+    QTRY_COMPARE_WITH_TIMEOUT(openSpy.count(), 1, 5000);
+    QCOMPARE(openSpy.first().at(0).toUrl(), videoUrl());
+
+    QDBusConnection::sessionBus().unregisterObject(
+        QStringLiteral("/org/freedesktop/portal/desktop"));
+    QDBusConnection::sessionBus().unregisterService(
+        QStringLiteral("org.freedesktop.portal.Desktop"));
 }
 
 QTEST_MAIN(BackendTests)

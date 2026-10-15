@@ -146,12 +146,13 @@ QImage thumbnail(const QString &path, double time, int height,
 QStringList shownFrameArgs(const QString &path, double pts) {
     // Packets only, nothing decoded, so reaching back 30s is cheap. That
     // covers a recording's still last frame, held long past its start. The
-    // 2s past it covers B-frames, whose packets come after later frames'.
+    // 10s past it covers B-frames, whose packets come after later frames',
+    // by a few frames: seconds, at a frame a second.
     return {
         "-v", "error",
         "-select_streams", "V:0",
         "-read_intervals", QString("%1%%2").arg(qMax(pts - 30.0, 0.0), 0, 'f', 3)
-                               .arg(pts + 2.0, 0, 'f', 3),
+                               .arg(pts + 10.0, 0, 'f', 3),
         "-show_entries", "packet=pts_time,flags",
         "-of", "csv=p=0",
         path,

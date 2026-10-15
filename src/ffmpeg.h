@@ -13,8 +13,8 @@ namespace ffmpeg {
 struct VideoInfo {
     QString path;
     double duration = 0.0;  // seconds
-    // Where the timestamps start. Seeks and playback count from here, packet
-    // times from 0.
+    // Where the timestamps start. Packet times include it; seeks and the
+    // player's positions count from it as 0.
     double start = 0.0;
     // As displayed: swapped for video rotated a quarter turn.
     int width = 0;

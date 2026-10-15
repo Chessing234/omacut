@@ -193,11 +193,13 @@ private slots:
     void loadRefusesAnythingButAbsoluteLocalPaths();
     void addingAVideoInsertsItAfterThePlayheadsClip();
     void probeReportsTheDisplayedSize();
+    void probeReadsStreamedWebmAndSkipsCoverArt();
     void thumbProviderServesAndCachesFrames();
     void thumbProviderStopsBlockedJobs();
     void exportDialogDelegatesSuggestedUrl();
     void suggestedExportUrlAlwaysUsesMp4();
     void exportClipWritesMp4();
+    void exportOddSizedWebmWritesEvenMp4();
     void exportKeepsOnlyTheClipsFromTheDialog();
     void exportJoinsDifferentVideos();
     void exportSkipsClipsWhoseVideoIsGone();
@@ -407,6 +409,91 @@ void BackendTests::probeReportsTheDisplayedSize() {
     QCOMPARE(ffmpeg::probe(pal).height, 576);
 }
 
+void BackendTests::probeReadsStreamedWebmAndSkipsCoverArt() {
+    const QString ffmpegBin = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+    QVERIFY(!ffmpegBin.isEmpty());
+
+    // Streamed to a pipe, a WebM's header carries no duration at all (the way
+    // a browser's MediaRecorder writes one); probe falls back to the packets.
+    const QString streamed = m_dir.filePath(QStringLiteral("streamed.webm"));
+    {
+        QProcess proc;
+        proc.setStandardOutputFile(streamed);
+        proc.start(ffmpegBin, {
+            QStringLiteral("-loglevel"), QStringLiteral("error"),
+            QStringLiteral("-f"), QStringLiteral("lavfi"),
+            QStringLiteral("-i"), QStringLiteral("testsrc=size=32x32:rate=10:duration=1.5"),
+            QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
+            QStringLiteral("-c:v"), QStringLiteral("libvpx-vp9"),
+            QStringLiteral("-f"), QStringLiteral("webm"),
+            QStringLiteral("pipe:1"),
+        });
+        QVERIFY(proc.waitForFinished(10000));
+        QCOMPARE(proc.exitCode(), 0);
+    }
+    const ffmpeg::VideoInfo webmInfo = ffmpeg::probe(streamed);
+    QVERIFY2(webmInfo.ok, qPrintable(webmInfo.error));
+    QVERIFY2(qAbs(webmInfo.duration - 1.5) < 0.15, qPrintable(QString::number(webmInfo.duration)));
+
+    // Timestamps that start an hour in still make a 1.5s video.
+    const QString late = m_dir.filePath(QStringLiteral("streamed-late.webm"));
+    {
+        QProcess proc;
+        proc.setStandardOutputFile(late);
+        proc.start(ffmpegBin, {
+            QStringLiteral("-loglevel"), QStringLiteral("error"),
+            QStringLiteral("-f"), QStringLiteral("lavfi"),
+            QStringLiteral("-i"), QStringLiteral("testsrc=size=32x32:rate=10:duration=1.5"),
+            QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
+            QStringLiteral("-c:v"), QStringLiteral("libvpx-vp9"),
+            QStringLiteral("-output_ts_offset"), QStringLiteral("3600"),
+            QStringLiteral("-f"), QStringLiteral("webm"),
+            QStringLiteral("pipe:1"),
+        });
+        QVERIFY(proc.waitForFinished(10000));
+        QCOMPARE(proc.exitCode(), 0);
+    }
+    const ffmpeg::VideoInfo lateInfo = ffmpeg::probe(late);
+    QVERIFY2(lateInfo.ok, qPrintable(lateInfo.error));
+    QVERIFY2(qAbs(lateInfo.duration - 1.5) < 0.15, qPrintable(QString::number(lateInfo.duration)));
+
+    // Cover art is listed as a video stream, but an audio file with art has
+    // no video to edit.
+    const QString cover = m_dir.filePath(QStringLiteral("cover.png"));
+    const QString song = m_dir.filePath(QStringLiteral("song-with-art.m4a"));
+    {
+        QProcess proc;
+        proc.start(ffmpegBin, {
+            QStringLiteral("-loglevel"), QStringLiteral("error"),
+            QStringLiteral("-f"), QStringLiteral("lavfi"),
+            QStringLiteral("-i"), QStringLiteral("color=c=red:size=16x16:d=1"),
+            QStringLiteral("-frames:v"), QStringLiteral("1"),
+            QStringLiteral("-y"), cover,
+        });
+        QVERIFY(proc.waitForFinished(10000));
+        QCOMPARE(proc.exitCode(), 0);
+
+        proc.start(ffmpegBin, {
+            QStringLiteral("-loglevel"), QStringLiteral("error"),
+            QStringLiteral("-f"), QStringLiteral("lavfi"),
+            QStringLiteral("-i"), QStringLiteral("sine=duration=1"),
+            QStringLiteral("-i"), cover,
+            QStringLiteral("-map"), QStringLiteral("0:a"),
+            QStringLiteral("-map"), QStringLiteral("1:v"),
+            QStringLiteral("-c:a"), QStringLiteral("aac"),
+            QStringLiteral("-c:v"), QStringLiteral("png"),
+            QStringLiteral("-disposition:v:0"), QStringLiteral("attached_pic"),
+            QStringLiteral("-y"), song,
+        });
+        QVERIFY(proc.waitForFinished(10000));
+        QCOMPARE(proc.exitCode(), 0);
+    }
+    const ffmpeg::VideoInfo songInfo = ffmpeg::probe(song);
+    QVERIFY(!songInfo.ok);
+    // Nor is a still image a video, though it has a frame and no duration.
+    QVERIFY(!ffmpeg::probe(cover).ok);
+}
+
 void BackendTests::thumbProviderServesAndCachesFrames() {
     ThumbProvider provider;
     provider.setVideo(7, m_videoPath);
@@ -524,6 +611,44 @@ void BackendTests::exportClipWritesMp4() {
     QVERIFY(ffmpeg::probe(mp4Path).ok);
     QVERIFY2(formatName(mp4Path).contains(QStringLiteral("mp4")),
              qPrintable(formatName(mp4Path)));
+}
+
+void BackendTests::exportOddSizedWebmWritesEvenMp4() {
+    // Region and window captures can have odd dimensions (which VP9/WebM
+    // allows and libx264 refuses unless rounded down to even).
+    const QString oddWebm = m_dir.filePath(QStringLiteral("odd-region.webm"));
+    {
+        QProcess proc;
+        proc.start(QStandardPaths::findExecutable(QStringLiteral("ffmpeg")), {
+            QStringLiteral("-loglevel"), QStringLiteral("error"),
+            QStringLiteral("-f"), QStringLiteral("lavfi"),
+            QStringLiteral("-i"), QStringLiteral("testsrc=size=33x35:rate=10:duration=1"),
+            QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
+            QStringLiteral("-c:v"), QStringLiteral("libvpx-vp9"),
+            QStringLiteral("-y"), oddWebm,
+        });
+        QVERIFY(proc.waitForFinished(10000));
+        QCOMPARE(proc.exitCode(), 0);
+    }
+
+    ThumbProvider provider;
+    auto *picker = new FakeFilePicker;
+    Backend backend(&provider, picker);
+    QSignalSpy doneSpy(&backend, &Backend::exportDone);
+    QSignalSpy failedSpy(&backend, &Backend::exportFailed);
+
+    QVERIFY(backend.load(QUrl::fromLocalFile(oddWebm)));
+    waitForBackgroundWork(backend);
+
+    const QString outPath = m_dir.filePath(QStringLiteral("odd-region-exported.mp4"));
+    backend.exportClips(QUrl::fromLocalFile(outPath), backend.timeline()->clips());
+    QTRY_VERIFY_WITH_TIMEOUT(doneSpy.count() + failedSpy.count() > 0, 20000);
+    QVERIFY2(failedSpy.isEmpty(), qPrintable(failedSpy.value(0).value(0).toString()));
+
+    const ffmpeg::VideoInfo info = ffmpeg::probe(outPath);
+    QVERIFY(info.ok);
+    QCOMPARE(info.width, 32);
+    QCOMPARE(info.height, 34);
 }
 
 QString BackendTests::makeVideo(const QString &name, double duration, bool audio, const QString &size) {
@@ -1363,6 +1488,7 @@ void BackendTests::trimArgsReencodeForPreciseCuts() {
                                               QStringLiteral("out.mp4"), 1920, 1080);
 
     QVERIFY(args.contains(QStringLiteral("libx264")));
+    QVERIFY(args.contains(QStringLiteral("yuv420p")));
     QVERIFY(args.contains(QStringLiteral("aac")));
     QVERIFY(args.contains(QStringLiteral("+faststart")));
     QVERIFY(!args.contains(QStringLiteral("copy")));
@@ -1386,15 +1512,17 @@ void BackendTests::trimArgsConcatenateTheRanges() {
                                              {QStringLiteral("in.mp4"), 2.0, 3.5, true}};
     const QStringList args = ffmpeg::trimArgs(segments, QStringLiteral("out.mp4"), 1920, 1080);
     QCOMPARE(args.count(QStringLiteral("-i")), 2);
-    // One video needs no fitting together.
+    // One video needs no fitting together, only even sides.
     QCOMPARE(filterGraph(args),
-             QStringLiteral("[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[v][a]"));
+             QStringLiteral("[0:V:0][0:a:0][1:V:0][1:a:0]concat=n=2:v=1:a=1[joined][a];"
+                            "[joined]crop=trunc(iw/2)*2:trunc(ih/2)*2:0:0[v]"));
 
     // Without audio, only the video is joined and mapped.
     const QStringList silent = ffmpeg::trimArgs({{QStringLiteral("in.mp4"), 0.0, 1.0, false},
                                                  {QStringLiteral("in.mp4"), 2.0, 3.5, false}},
                                                 QStringLiteral("out.mp4"), 1920, 1080);
-    QCOMPARE(filterGraph(silent), QStringLiteral("[0:v:0][1:v:0]concat=n=2:v=1:a=0[v]"));
+    QCOMPARE(filterGraph(silent), QStringLiteral("[0:V:0][1:V:0]concat=n=2:v=1:a=0[joined];"
+                                                  "[joined]crop=trunc(iw/2)*2:trunc(ih/2)*2:0:0[v]"));
     QVERIFY(!silent.contains(QStringLiteral("[a]")));
     QVERIFY(!silent.contains(QStringLiteral("aac")));
 }
@@ -1406,11 +1534,11 @@ void BackendTests::trimArgsFitDifferentVideosTogether() {
     // Each has its pixels squared, then is letterboxed into the first's frame
     // (sides kept even), and the silent one gets silence to match.
     QCOMPARE(filterGraph(args),
-             QStringLiteral("[0:v:0]scale='trunc(iw*sar/2)*2':ih,setsar=1,"
+             QStringLiteral("[0:V:0]scale='trunc(iw*sar/2)*2':ih,setsar=1,"
                             "scale=1920:1080:force_original_aspect_ratio=decrease,"
                             "pad=1920:1080:-1:-1,setsar=1,format=yuv420p[v0];"
                             "[0:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a0];"
-                            "[1:v:0]scale='trunc(iw*sar/2)*2':ih,setsar=1,"
+                            "[1:V:0]scale='trunc(iw*sar/2)*2':ih,setsar=1,"
                             "scale=1920:1080:force_original_aspect_ratio=decrease,"
                             "pad=1920:1080:-1:-1,setsar=1,format=yuv420p[v1];"
                             "anullsrc=r=48000:cl=stereo,atrim=duration=2.000,aformat=sample_fmts=fltp[a1];"
@@ -1424,10 +1552,15 @@ void BackendTests::trimArgsScaleTheShorterSide() {
     QVERIFY(!filterGraph(ffmpeg::trimArgs(segment, QStringLiteral("out.mp4"), 1920, 1080))
                  .contains(QStringLiteral("scale")));
 
+    // Sides are rounded down to even so libx264 can open the encoder.
+    QCOMPARE(filterGraph(ffmpeg::trimArgs(segment, QStringLiteral("out.mp4"), 1921, 1080)),
+             QStringLiteral("[0:V:0][0:a:0]concat=n=1:v=1:a=1[joined][a];"
+                            "[joined]crop=trunc(iw/2)*2:trunc(ih/2)*2:0:0[v]"));
+
     // The filter caps whichever side is shorter, keeping the aspect ratio for
     // portrait and landscape alike.
     QCOMPARE(filterGraph(ffmpeg::trimArgs(segment, QStringLiteral("out.mp4"), 1920, 1080, 1080)),
-             QStringLiteral("[0:v:0][0:a:0]concat=n=1:v=1:a=1[joined][a];"
+             QStringLiteral("[0:V:0][0:a:0]concat=n=1:v=1:a=1[joined][a];"
                             "[joined]scale='if(gt(iw,ih),-2,1080)':'if(gt(iw,ih),1080,-2)'[v]"));
 }
 

@@ -14,6 +14,50 @@ namespace {
 constexpr int kProbeTimeoutMs = 15000;
 // Poll granularity while waiting on a thumbnail child, so cancellation is prompt.
 constexpr int kThumbPollMs = 50;
+
+// Streamed WebM/MKV captures (e.g. from a browser's MediaRecorder) have no
+// duration in the header; scan the video stream's packet timestamps. That
+// reads the whole file, on the UI thread, so it's only the last resort: a
+// couple of hours of cached video takes under a second, a slow disk up to
+// the probe timeout.
+double probePacketDuration(const QString &ffprobe, const QString &path, int streamIndex) {
+    QProcess proc;
+    proc.start(ffprobe, {
+        "-v", "error",
+        "-select_streams", QString::number(streamIndex),
+        "-show_entries", "packet=pts_time,duration_time",
+        "-of", "csv=p=0",
+        path,
+    });
+    if (!proc.waitForFinished(kProbeTimeoutMs)) {
+        proc.kill();
+        proc.waitForFinished(-1);
+        return 0.0;
+    }
+    if (proc.exitStatus() != QProcess::NormalExit || proc.exitCode() != 0)
+        return 0.0;
+
+    // From the first timestamp, which a cut or a capture can start well past 0.
+    // A single packet is a still image, not a video.
+    double first = 0.0, end = 0.0;
+    int packets = 0;
+    for (const QByteArray &raw : proc.readAllStandardOutput().split('\n')) {
+        const QByteArray line = raw.trimmed();
+        if (line.isEmpty())
+            continue;
+        const QList<QByteArray> fields = line.split(',');
+        bool ptsOk = false;
+        const double pts = fields.value(0).toDouble(&ptsOk);
+        if (!ptsOk)
+            continue;
+        bool durOk = false;
+        const double pktDur = fields.value(1).toDouble(&durOk);
+        first = packets == 0 ? pts : qMin(first, pts);
+        end = qMax(end, pts + (durOk && pktDur > 0.0 ? pktDur : 0.0));
+        ++packets;
+    }
+    return packets > 1 ? end - first : 0.0;
+}
 }
 
 QString toolPath(const QString &tool) {
@@ -58,7 +102,9 @@ VideoInfo probe(const QString &path) {
     for (const QJsonValue &value : root.value("streams").toArray()) {
         const QJsonObject candidate = value.toObject();
         const QString type = candidate.value("codec_type").toString();
-        if (type == "video" && stream.isEmpty())
+        // Skip embedded cover art, which ffprobe lists as a single-frame video stream.
+        if (type == "video" && stream.isEmpty()
+                && candidate.value("disposition").toObject().value("attached_pic").toInt() != 1)
             stream = candidate;
         else if (type == "audio")
             info.audio = true;
@@ -86,16 +132,20 @@ VideoInfo probe(const QString &path) {
 
     info.start = root.value("format").toObject().value("start_time").toString().toDouble();
 
-    // Duration can live on the stream or on the container.
+    // Duration can live on the stream, on the container, or (for streamed
+    // WebM captures) only on the last video packet.
     QString durationStr = stream.value("duration").toString();
     if (durationStr.isEmpty())
         durationStr = root.value("format").toObject().value("duration").toString();
-    if (durationStr.isEmpty()) {
-        info.error = "Could not determine the video duration.";
-        return info;
+    if (!durationStr.isEmpty()) {
+        info.duration = durationStr.toDouble();
+    } else {
+        info.duration = probePacketDuration(ffprobe, path, stream.value("index").toInt());
+        if (info.duration <= 0.0) {
+            info.error = "Could not determine the video duration.";
+            return info;
+        }
     }
-
-    info.duration = durationStr.toDouble();
 
     info.ok = info.duration > 0.0;
     if (!info.ok)
@@ -216,6 +266,7 @@ QStringList trimArgs(const QList<Segment> &segments, const QString &dst,
     QStringList args = {"-y", "-loglevel", "error", "-progress", "pipe:1"};
     // One input per segment: -ss before -i seeks fast and -t bounds it, so
     // only what survives the cut is decoded. The concat filter joins them.
+    // V:0 is the first video stream that isn't cover art, as probe picks.
     QString graph;
     QString inputs;
     for (int i = 0; i < segments.size(); ++i) {
@@ -224,13 +275,13 @@ QStringList trimArgs(const QList<Segment> &segments, const QString &dst,
         args << "-ss" << QString::number(segment.start, 'f', 3) << "-t" << length
              << "-i" << segment.path;
         if (!mixed) {
-            inputs += QString("[%1:v:0]").arg(i) + (audio ? QString("[%1:a:0]").arg(i) : QString());
+            inputs += QString("[%1:V:0]").arg(i) + (audio ? QString("[%1:a:0]").arg(i) : QString());
             continue;
         }
         // Concat needs one frame size and one audio format throughout. Pixels
         // are squared first, so non-square video keeps its shape; -1 centres
         // the padding; libx264 needs even sides.
-        graph += QString("[%1:v:0]scale='trunc(iw*sar/2)*2':ih,setsar=1,"
+        graph += QString("[%1:V:0]scale='trunc(iw*sar/2)*2':ih,setsar=1,"
                          "scale=%2:%3:force_original_aspect_ratio=decrease,"
                          "pad=%2:%3:-1:-1,setsar=1,format=yuv420p[v%1];")
                      .arg(i).arg(width / 2 * 2).arg(height / 2 * 2);
@@ -248,14 +299,21 @@ QStringList trimArgs(const QList<Segment> &segments, const QString &dst,
     if (scaleHeight > 0)
         graph += QString("[joined]%1;[joined]scale='if(gt(iw,ih),-2,%2)':'if(gt(iw,ih),%2,-2)'[v]")
                      .arg(audio ? "[a]" : "").arg(scaleHeight);
+    // libx264 needs even sides. Judged on the decoded frame, since the probed
+    // size is the displayed one; cropping the odd pixel keeps pixels square.
+    else if (!mixed)
+        graph += QString("[joined]%1;[joined]crop=trunc(iw/2)*2:trunc(ih/2)*2:0:0[v]")
+                     .arg(audio ? "[a]" : "");
     else
         graph += QString("[v]") + (audio ? "[a]" : "");
     args << "-filter_complex" << graph << "-map" << "[v]";
     if (audio)
         args << "-map" << "[a]" << "-c:a" << "aac";
     // +faststart puts the moov atom up front so shared clips start playing
-    // before they finish downloading.
-    args << "-c:v" << "libx264" << "-preset" << "veryfast" << "-crf" << "18"
+    // before they finish downloading; yuv420p keeps RGB/4:4:4/10-bit sources
+    // playable everywhere.
+    args << "-c:v" << "libx264" << "-pix_fmt" << "yuv420p"
+         << "-preset" << "veryfast" << "-crf" << "18"
          << "-movflags" << "+faststart"
          << dst;
     return args;

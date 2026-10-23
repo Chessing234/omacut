@@ -303,6 +303,7 @@ private slots:
     void timelineUndoesAGestureAsOneStep();
     void timelineTracksUnexportedCuts();
     void timelineAddsAndMovesVideos();
+    void timelineSeeksAcrossARealCut();
     void timelineAnswersWhereTimesFall();
     void timelineEditsAtATime();
     void trimArgsReencodeForPreciseCuts();
@@ -1788,6 +1789,22 @@ void BackendTests::timelineSplitsTrimsAndJoins() {
     // Touching pieces of the same stretch export as one.
     timeline.split(5.0);
     QCOMPARE(edit::merged(timeline.clips()), wholeVideo(10.0));
+}
+
+void BackendTests::timelineSeeksAcrossARealCut() {
+    const edit::Clip left{0, 0.0, 5.0};
+    QVERIFY(edit::continues(left, {0, 5.0, 8.0}));
+    QVERIFY(edit::continues(left, {0, 5.0004, 8.0}));
+    QVERIFY(!edit::continues(left, {0, 5.04, 8.0}));
+    QVERIFY(!edit::continues(left, {1, 5.0, 8.0}));
+
+    Timeline timeline;
+    timeline.reset(10.0);
+    timeline.split(5.0);
+    QVERIFY(timeline.continues(0));
+    timeline.setClip(1, 5.04, 10.0);
+    QVERIFY(!timeline.continues(0));
+    QCOMPARE(edit::merged(timeline.clips()).size(), 2);
 }
 
 void BackendTests::timelineAddsAndMovesVideos() {
